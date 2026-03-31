@@ -13,15 +13,15 @@ const io = new Server(server, { cors: { origin: "*" } });
 let gameState = {
     refereeId: null,
     lobbyOpen: false,
-    authorizedNames: [], // Permanent list of who "made it in" before the door closed
-    allViewers: [],      // Active connections {id, name, role}
+    authorizedNames: [],
+    allViewers: [],
     availableCards: [],
     team1Picks: [],
     team2Picks: [],
-    team1Player: null,   // The specific person assigned to T1 {id, name}
-    team2Player: null,   // The specific person assigned to T2 {id, name}
+    team1Player: null,
+    team2Player: null,
     currentTurn: "team1",
-    teamSize: 5,
+    maxPicks: 11,        // Hardcoded to 11 per team as requested
     gameStarted: false,
     secretRefToken: "eric_ref_2024"
 };
@@ -40,26 +40,16 @@ io.on('connection', (socket) => {
     socket.on('joinWaitingRoom', (data) => {
         const name = data.name.trim();
         const isAlreadyAuthorized = gameState.authorizedNames.includes(name);
-
-        // LOCKOUT LOGIC: If lobby is closed and you weren't already in, you stay out.
         if (!gameState.lobbyOpen && !isAlreadyAuthorized) {
-            socket.emit('error', 'Lobby is closed. You are not on the authorized spectator list.');
+            socket.emit('error', 'Lobby is closed.');
             return;
         }
-
-        // AUTHORIZE: Add to the permanent list if lobby is open
         if (gameState.lobbyOpen && !isAlreadyAuthorized) {
             gameState.authorizedNames.push(name);
         }
-
-        // ACTIVE CONNECTION: Update or add to active viewers
         const existingViewer = gameState.allViewers.find(v => v.name === name);
-        if (existingViewer) {
-            existingViewer.id = socket.id; // Update socket ID on refresh
-        } else {
-            gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator' });
-        }
-        
+        if (existingViewer) { existingViewer.id = socket.id; } 
+        else { gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator' }); }
         io.emit('gameStateUpdate', gameState);
     });
 
@@ -80,35 +70,55 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('refStartDraft', async (config) => {
+    socket.on('refStartDraft', async () => {
         if (socket.id !== gameState.refereeId) return;
-        const response = await axios.get(process.env.SHEET_URL);
-        gameState.availableCards = await csv().fromString(response.data);
-        gameState.teamSize = config.teamSize;
-        gameState.gameStarted = true;
-        gameState.team1Picks = [];
-        gameState.team2Picks = [];
-        gameState.currentTurn = "team1";
-        io.emit('gameStateUpdate', gameState);
+        try {
+            const response = await axios.get(process.env.SHEET_URL);
+            let allCards = await csv().fromString(response.data);
+            
+            // Limit to exactly 100 cards as requested
+            gameState.availableCards = allCards.slice(0, 100); 
+            
+            gameState.gameStarted = true;
+            gameState.team1Picks = [];
+            gameState.team2Picks = [];
+            gameState.currentTurn = "team1";
+            io.emit('gameStateUpdate', gameState);
+        } catch (e) { console.log("Fetch Error"); }
     });
 
     socket.on('playerPickCard', (cardId) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
-        // ONLY the assigned Team 1 or Team 2 player can pick
         if (!user || user.role !== gameState.currentTurn) return;
 
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
-            if (card.pos === 'GK' && gameState[`${user.role}Picks`].some(p => p.pos === 'GK')) return;
+            // GK Rule remains
+            if ((card.pos === 'GK' || card.pos === 'Goal Keeper') && 
+                gameState[`${user.role}Picks`].some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
+                socket.emit('error', 'You already have a Goal Keeper!');
+                return;
+            }
+            
             gameState[`${user.role}Picks`].push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
+            
+            // Switch turns
             gameState.currentTurn = gameState.currentTurn === "team1" ? "team2" : "team1";
             
-            if (gameState.team1Picks.length >= gameState.teamSize && gameState.team2Picks.length >= gameState.teamSize) {
+            // Check if BOTH teams have reached exactly 11 cards
+            if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
                 gameState.currentTurn = "FINISHED";
             }
             io.emit('gameStateUpdate', gameState);
         }
+    });
+
+    // REFEREE: CLOSE GAME (Force Finish)
+    socket.on('refCloseGame', () => {
+        if (socket.id !== gameState.refereeId) return;
+        gameState.currentTurn = "CLOSED BY REFEREE";
+        io.emit('gameStateUpdate', gameState);
     });
 
     socket.on('refReset', () => {
