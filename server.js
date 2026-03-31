@@ -21,31 +21,50 @@ io.on('connection', (socket) => {
         io.emit('playersUpdate', players);
     });
 
-    socket.on('hostStartGame', async () => {
+    socket.on('hostStartGame', async (data) => {
         try {
-            // This grabs your Google Sheet players from the link you put in Render
             const response = await axios.get(process.env.SHEET_URL);
-            const data = await csv().fromString(response.data);
+            const allCards = await csv().fromString(response.data);
             
-            availableCards = data;
-            draftOrder = [...players, ...[...players].reverse()]; 
+            const teamSize = data.teamSize || 5; 
+            availableCards = allCards;
+            
+            // SNAKE DRAFT LOGIC: P1, P2, P2, P1, P1, P2...
+            draftOrder = [];
+            let p1 = players[0];
+            let p2 = players[1];
+            
+            for (let i = 0; i < teamSize; i++) {
+                if (i % 2 === 0) {
+                    draftOrder.push(p1, p2);
+                } else {
+                    draftOrder.push(p2, p1);
+                }
+            }
+            
             turnIndex = 0;
-
             io.emit('startDraft', { 
                 cards: availableCards, 
-                currentTurnId: draftOrder[0].id 
+                currentTurnId: draftOrder[0].id,
+                teamSize: teamSize
             });
         } catch (error) {
-            console.error("Error loading players:", error);
+            console.error("Draft Start Error:", error);
         }
     });
 
     socket.on('pickCard', (cardId) => {
+        if (turnIndex >= draftOrder.length) return;
+        const currentPicker = draftOrder[turnIndex];
+        
+        if (socket.id !== currentPicker.id) return;
+
         const card = availableCards.find(c => c.id === cardId);
         if (card) {
             availableCards = availableCards.filter(c => c.id !== cardId);
             turnIndex++;
             const nextTurnId = draftOrder[turnIndex] ? draftOrder[turnIndex].id : null;
+            
             io.emit('cardPicked', { 
                 card, 
                 pickerId: socket.id, 
