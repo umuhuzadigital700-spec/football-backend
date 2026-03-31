@@ -2,7 +2,8 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const fs = require('fs');
+const axios = require('axios');
+const csv = require('csvtojson');
 
 const app = express();
 app.use(cors());
@@ -20,19 +21,23 @@ io.on('connection', (socket) => {
         io.emit('playersUpdate', players);
     });
 
-    socket.on('hostStartGame', () => {
-        const data = JSON.parse(fs.readFileSync('./players.json', 'utf8'));
-        availableCards = data;
-        
-        // Create the Snake Draft Order: [P1, P2, P2, P1]
-        draftOrder = [...players, ...[...players].reverse()]; 
-        turnIndex = 0;
+    socket.on('hostStartGame', async () => {
+        try {
+            // This grabs your Google Sheet players from the link you put in Render
+            const response = await axios.get(process.env.SHEET_URL);
+            const data = await csv().fromString(response.data);
+            
+            availableCards = data;
+            draftOrder = [...players, ...[...players].reverse()]; 
+            turnIndex = 0;
 
-        io.emit('startDraft', { 
-            cards: availableCards, 
-            order: draftOrder, 
-            currentTurnId: draftOrder[0].id 
-        });
+            io.emit('startDraft', { 
+                cards: availableCards, 
+                currentTurnId: draftOrder[0].id 
+            });
+        } catch (error) {
+            console.error("Error loading players:", error);
+        }
     });
 
     socket.on('pickCard', (cardId) => {
@@ -40,9 +45,7 @@ io.on('connection', (socket) => {
         if (card) {
             availableCards = availableCards.filter(c => c.id !== cardId);
             turnIndex++;
-            
             const nextTurnId = draftOrder[turnIndex] ? draftOrder[turnIndex].id : null;
-            
             io.emit('cardPicked', { 
                 card, 
                 pickerId: socket.id, 
