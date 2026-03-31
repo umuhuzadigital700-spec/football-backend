@@ -1,7 +1,4 @@
-// ... existing imports and setup ...
-
-    socket.on('refStartDraft', async (config) => {
-        if (socket.id !== gameStatconst express = require('express');
+const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
@@ -16,15 +13,16 @@ const io = new Server(server, { cors: { origin: "*" } });
 let gameState = {
     refereeId: null,
     lobbyOpen: false,
-    authorizedNames: [],
-    allViewers: [],
+    authorizedNames: [], 
+    allViewers: [],      
     availableCards: [],
     team1Picks: [],
     team2Picks: [],
-    team1Player: null,
-    team2Player: null,
+    team1Player: null,   
+    team2Player: null,   
     currentTurn: "team1",
-    maxPicks: 11,        // Hardcoded to 11 per team as requested
+    matchType: 1,        // Added back (1v1, 2v2, etc.)
+    maxPicks: 11,        // Hardcoded to 11 per team
     gameStarted: false,
     secretRefToken: "eric_ref_2024"
 };
@@ -51,8 +49,11 @@ io.on('connection', (socket) => {
             gameState.authorizedNames.push(name);
         }
         const existingViewer = gameState.allViewers.find(v => v.name === name);
-        if (existingViewer) { existingViewer.id = socket.id; } 
-        else { gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator' }); }
+        if (existingViewer) {
+            existingViewer.id = socket.id;
+        } else {
+            gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator' });
+        }
         io.emit('gameStateUpdate', gameState);
     });
 
@@ -73,7 +74,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('refStartDraft', async () => {
+    socket.on('refStartDraft', async (config) => {
         if (socket.id !== gameState.refereeId) return;
         try {
             const response = await axios.get(process.env.SHEET_URL);
@@ -81,6 +82,9 @@ io.on('connection', (socket) => {
             
             // Limit to exactly 100 cards as requested
             gameState.availableCards = allCards.slice(0, 100); 
+            
+            // Set the Match Type (1v1, 5v5 etc) but still pick 11 each
+            gameState.matchType = config.teamSize || 1;
             
             gameState.gameStarted = true;
             gameState.team1Picks = [];
@@ -96,9 +100,9 @@ io.on('connection', (socket) => {
 
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
-            // GK Rule remains
-            if ((card.pos === 'GK' || card.pos === 'Goal Keeper') && 
-                gameState[`${user.role}Picks`].some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
+            // Position Rule: Max 1 Goal Keeper
+            const isGK = card.pos === 'GK' || card.pos === 'Goal Keeper';
+            if (isGK && gameState[`${user.role}Picks`].some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
                 socket.emit('error', 'You already have a Goal Keeper!');
                 return;
             }
@@ -106,10 +110,10 @@ io.on('connection', (socket) => {
             gameState[`${user.role}Picks`].push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
             
-            // Switch turns
+            // Swap turns
             gameState.currentTurn = gameState.currentTurn === "team1" ? "team2" : "team1";
             
-            // Check if BOTH teams have reached exactly 11 cards
+            // Draft ends when BOTH teams have 11 players
             if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
                 gameState.currentTurn = "FINISHED";
             }
@@ -117,7 +121,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // REFEREE: CLOSE GAME (Force Finish)
     socket.on('refCloseGame', () => {
         if (socket.id !== gameState.refereeId) return;
         gameState.currentTurn = "CLOSED BY REFEREE";
@@ -133,50 +136,7 @@ io.on('connection', (socket) => {
     });
 });
 
-server.listen(process.env.PORT || 5000);e.refereeId) return;
-        try {
-            const response = await axios.get(process.env.SHEET_URL);
-            let allCards = await csv().fromString(response.data);
-            
-            // Limit to exactly 100 cards
-            gameState.availableCards = allCards.slice(0, 100); 
-            
-            // Set the match type (1v1, 2v2, etc.)
-            gameState.matchType = config.teamSize || 1; 
-            
-            gameState.gameStarted = true;
-            gameState.team1Picks = [];
-            gameState.team2Picks = [];
-            gameState.currentTurn = "team1";
-            io.emit('gameStateUpdate', gameState);
-        } catch (e) { console.log("Fetch Error"); }
-    });
-
-    socket.on('playerPickCard', (cardId) => {
-        const user = gameState.allViewers.find(v => v.id === socket.id);
-        if (!user || user.role !== gameState.currentTurn) return;
-
-        const card = gameState.availableCards.find(c => c.id === cardId);
-        if (card) {
-            // Position Rule: 1 GK
-            if ((card.pos === 'GK' || card.pos === 'Goal Keeper') && 
-                gameState[`${user.role}Picks`].some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
-                socket.emit('error', 'You already have a Goal Keeper!');
-                return;
-            }
-            
-            gameState[`${user.role}Picks`].push(card);
-            gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
-            
-            // Snake/Turn Swap
-            gameState.currentTurn = gameState.currentTurn === "team1" ? "team2" : "team1";
-            
-            // ALWAYS Draft until 11 picks per team are reached
-            if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
-                gameState.currentTurn = "FINISHED";
-            }
-            io.emit('gameStateUpdate', gameState);
-        }
-    });
-
-// ... rest of the file stays the same ...
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
