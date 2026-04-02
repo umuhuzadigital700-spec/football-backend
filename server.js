@@ -38,23 +38,42 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('joinWaitingRoom', (data) => {
+socket.on('joinWaitingRoom', async (data) => {
         const name = data.name.trim();
-        const isAlreadyAuthorized = gameState.authorizedNames.includes(name);
-        if (!gameState.lobbyOpen && !isAlreadyAuthorized) {
-            socket.emit('error', 'Lobby is closed.');
+        const txId = data.ticketCode ? data.ticketCode.trim() : "";
+
+        if (!txId) {
+            socket.emit('error', 'Transaction ID is required to enter.');
             return;
         }
-        if (gameState.lobbyOpen && !isAlreadyAuthorized) {
-            gameState.authorizedNames.push(name);
+
+        try {
+            // REPLACE THE URL BELOW WITH YOUR WEB APP URL FROM STEP 3
+            const sentinelUrl = `https://script.google.com/macros/s/YOUR_DEPLOY_ID/exec?code=${txId}&name=${name}`;
+            const response = await axios.get(sentinelUrl);
+
+            if (response.data.valid) {
+                // Check Arena Capacity (Max 30)
+                if (gameState.allViewers.length >= 30) {
+                    socket.emit('error', 'Arena is at full capacity (30/30).');
+                    return;
+                }
+
+                const existingViewer = gameState.allViewers.find(v => v.name === name);
+                if (existingViewer) {
+                    existingViewer.id = socket.id;
+                } else {
+                    gameState.authorizedNames.push(name);
+                    gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId });
+                }
+                io.emit('gameStateUpdate', gameState);
+            } else {
+                socket.emit('error', response.data.message || 'Payment not verified.');
+            }
+        } catch (error) {
+            console.error("Sentinel Error:", error);
+            socket.emit('error', 'Verification system is momentarily busy.');
         }
-        const existingViewer = gameState.allViewers.find(v => v.name === name);
-        if (existingViewer) {
-            existingViewer.id = socket.id;
-        } else {
-            gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator' });
-        }
-        io.emit('gameStateUpdate', gameState);
     });
 
     socket.on('refToggleLobby', () => {
