@@ -53,11 +53,25 @@ socket.on('joinWaitingRoom', async (data) => {
             const response = await axios.get(sentinelUrl);
 
             if (response.data.valid) {
-                // Check Arena Capacity (Max 30)
                 if (gameState.allViewers.length >= 30) {
                     socket.emit('error', 'Arena is at full capacity (30/30).');
                     return;
                 }
+
+                // Check if this specific socket is already in (refresh check)
+                const existingViewer = gameState.allViewers.find(v => v.name === name);
+                if (existingViewer) {
+                    existingViewer.id = socket.id;
+                    existingViewer.txId = txId; // Ensure TxID is attached
+                } else {
+                    gameState.authorizedNames.push(name);
+                    // CRITICAL: We add the txId here so the Frontend can verify it
+                    gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId });
+                }
+                io.emit('gameStateUpdate', gameState);
+            } else {
+                socket.emit('error', response.data.message || 'Payment not verified.');
+            }
 
                 const existingViewer = gameState.allViewers.find(v => v.name === name);
                 if (existingViewer) {
