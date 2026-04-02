@@ -21,8 +21,8 @@ let gameState = {
     team1Player: null,   
     team2Player: null,   
     currentTurn: "team1",
-    matchType: 1,        // Added back (1v1, 2v2, etc.)
-    maxPicks: 11,        // Hardcoded to 11 per team
+    matchType: 1,
+    maxPicks: 11,
     gameStarted: false,
     secretRefToken: "eric_ref_2024"
 };
@@ -38,7 +38,7 @@ io.on('connection', (socket) => {
         }
     });
 
-socket.on('joinWaitingRoom', async (data) => {
+    socket.on('joinWaitingRoom', async (data) => {
         const name = data.name.trim();
         const txId = data.ticketCode ? data.ticketCode.trim() : "";
 
@@ -48,8 +48,7 @@ socket.on('joinWaitingRoom', async (data) => {
         }
 
         try {
-            // REPLACE THE URL BELOW WITH YOUR WEB APP URL FROM STEP 3
-            const sentinelUrl = `https://script.google.com/macros/s/YOUR_DEPLOY_ID/exec?code=${txId}&name=${name}`;
+            const sentinelUrl = `https://script.google.com/macros/s/AKfycbyb34RFKBRI1prbwpwxDtLh1T2HMYHzDpxmeVF9RVpu1v0NX0PrPpUhm03lSOXXI8kG/exec?code=${txId}&name=${name}`;
             const response = await axios.get(sentinelUrl);
 
             if (response.data.valid) {
@@ -58,24 +57,10 @@ socket.on('joinWaitingRoom', async (data) => {
                     return;
                 }
 
-                // Check if this specific socket is already in (refresh check)
                 const existingViewer = gameState.allViewers.find(v => v.name === name);
                 if (existingViewer) {
                     existingViewer.id = socket.id;
-                    existingViewer.txId = txId; // Ensure TxID is attached
-                } else {
-                    gameState.authorizedNames.push(name);
-                    // CRITICAL: We add the txId here so the Frontend can verify it
-                    gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId });
-                }
-                io.emit('gameStateUpdate', gameState);
-            } else {
-                socket.emit('error', response.data.message || 'Payment not verified.');
-            }
-
-                const existingViewer = gameState.allViewers.find(v => v.name === name);
-                if (existingViewer) {
-                    existingViewer.id = socket.id;
+                    existingViewer.txId = txId;
                 } else {
                     gameState.authorizedNames.push(name);
                     gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId });
@@ -85,7 +70,6 @@ socket.on('joinWaitingRoom', async (data) => {
                 socket.emit('error', response.data.message || 'Payment not verified.');
             }
         } catch (error) {
-            console.error("Sentinel Error:", error);
             socket.emit('error', 'Verification system is momentarily busy.');
         }
     });
@@ -112,13 +96,8 @@ socket.on('joinWaitingRoom', async (data) => {
         try {
             const response = await axios.get(process.env.SHEET_URL);
             let allCards = await csv().fromString(response.data);
-            
-            // Limit to exactly 100 cards as requested
             gameState.availableCards = allCards.slice(0, 100); 
-            
-            // Set the Match Type (1v1, 5v5 etc) but still pick 11 each
             gameState.matchType = config.teamSize || 1;
-            
             gameState.gameStarted = true;
             gameState.team1Picks = [];
             gameState.team2Picks = [];
@@ -133,20 +112,14 @@ socket.on('joinWaitingRoom', async (data) => {
 
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
-            // Position Rule: Max 1 Goal Keeper
             const isGK = card.pos === 'GK' || card.pos === 'Goal Keeper';
             if (isGK && gameState[`${user.role}Picks`].some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
                 socket.emit('error', 'You already have a Goal Keeper!');
                 return;
             }
-            
             gameState[`${user.role}Picks`].push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
-            
-            // Swap turns
             gameState.currentTurn = gameState.currentTurn === "team1" ? "team2" : "team1";
-            
-            // Draft ends when BOTH teams have 11 players
             if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
                 gameState.currentTurn = "FINISHED";
             }
