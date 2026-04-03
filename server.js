@@ -25,7 +25,9 @@ let gameState = {
     maxPicks: 11,
     gameStarted: false,
     secretRefToken: "eric_ref_2024",
-    youtubeLink: "https://www.youtube.com/watch?v=YOUR_VIDEO_ID" // Default Link
+    youtubeLink: "https://www.youtube.com/watch?v=YOUR_VIDEO_ID",
+    customLink: { text: "Visit Our Shop", url: "#" }, // New Clickable Link
+    qrCodes: ["", "", "", "", "", ""] // 6 Places for QR Code Image URLs
 };
 
 io.on('connection', (socket) => {
@@ -42,19 +44,14 @@ io.on('connection', (socket) => {
     socket.on('joinWaitingRoom', async (data) => {
         const name = data.name.trim();
         const txId = data.ticketCode ? data.ticketCode.trim() : "";
-
         if (!txId) {
             socket.emit('error', 'Transaction ID is required.');
             return;
         }
-
         try {
-            // NEW WEB APP URL INTEGRATED BELOW
             const sentinelUrl = `https://script.google.com/macros/s/AKfycbzvG5wJmLfTAjKwIzSINNWQwWkEM3urFYdyWXuM2zhmHcMYKOh5tQCyvdtsv0xptkeX/exec?code=${txId}&name=${name}`;
             const response = await axios.get(sentinelUrl);
-
             if (response.data.valid) {
-                // LIMIT REMOVED: Anyone verified can enter
                 const existingViewer = gameState.allViewers.find(v => v.name === name);
                 if (existingViewer) {
                     existingViewer.id = socket.id;
@@ -70,6 +67,14 @@ io.on('connection', (socket) => {
         } catch (error) {
             socket.emit('error', 'Verification system is momentarily busy.');
         }
+    });
+
+    // NEW: Update QR Codes and Custom Link
+    socket.on('refUpdateExtraInfo', (data) => {
+        if (socket.id !== gameState.refereeId) return;
+        if (data.qrCodes) gameState.qrCodes = data.qrCodes;
+        if (data.customLink) gameState.customLink = data.customLink;
+        io.emit('gameStateUpdate', gameState);
     });
 
     socket.on('refUpdateYoutube', (newLink) => {
@@ -113,7 +118,6 @@ io.on('connection', (socket) => {
     socket.on('playerPickCard', (cardId) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || user.role !== gameState.currentTurn) return;
-
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
             const isGK = card.pos === 'GK' || card.pos === 'Goal Keeper';
@@ -138,7 +142,6 @@ io.on('connection', (socket) => {
         gameState.team2Picks = [];
         gameState.team1Player = null;
         gameState.team2Player = null;
-        // Set everyone back to spectators so you can pick new ones from chat
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
     });
