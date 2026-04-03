@@ -49,7 +49,8 @@ io.on('connection', (socket) => {
         }
 
         try {
-            const sentinelUrl = `https://script.google.com/macros/s/AKfycbyb34RFKBRI1prbwpwxDtLh1T2HMYHzDpxmeVF9RVpu1v0NX0PrPpUhm03lSOXXI8kG/exec?code=${txId}&name=${name}`;
+            // NEW WEB APP URL INTEGRATED BELOW
+            const sentinelUrl = `https://script.google.com/macros/s/AKfycbzvG5wJmLfTAjKwIzSINNWQwWkEM3urFYdyWXuM2zhmHcMYKOh5tQCyvdtsv0xptkeX/exec?code=${txId}&name=${name}`;
             const response = await axios.get(sentinelUrl);
 
             if (response.data.valid) {
