@@ -24,7 +24,8 @@ let gameState = {
     matchType: 1,
     maxPicks: 11,
     gameStarted: false,
-    secretRefToken: "eric_ref_2024"
+    secretRefToken: "eric_ref_2024",
+    youtubeLink: "https://www.youtube.com/watch?v=YOUR_VIDEO_ID" // Default Link
 };
 
 io.on('connection', (socket) => {
@@ -43,7 +44,7 @@ io.on('connection', (socket) => {
         const txId = data.ticketCode ? data.ticketCode.trim() : "";
 
         if (!txId) {
-            socket.emit('error', 'Transaction ID is required to enter.');
+            socket.emit('error', 'Transaction ID is required.');
             return;
         }
 
@@ -52,11 +53,7 @@ io.on('connection', (socket) => {
             const response = await axios.get(sentinelUrl);
 
             if (response.data.valid) {
-                if (gameState.allViewers.length >= 30) {
-                    socket.emit('error', 'Arena is at full capacity (30/30).');
-                    return;
-                }
-
+                // LIMIT REMOVED: Anyone verified can enter
                 const existingViewer = gameState.allViewers.find(v => v.name === name);
                 if (existingViewer) {
                     existingViewer.id = socket.id;
@@ -72,6 +69,12 @@ io.on('connection', (socket) => {
         } catch (error) {
             socket.emit('error', 'Verification system is momentarily busy.');
         }
+    });
+
+    socket.on('refUpdateYoutube', (newLink) => {
+        if (socket.id !== gameState.refereeId) return;
+        gameState.youtubeLink = newLink;
+        io.emit('gameStateUpdate', gameState);
     });
 
     socket.on('refToggleLobby', () => {
@@ -127,22 +130,18 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('refCloseGame', () => {
-        if (socket.id !== gameState.refereeId) return;
-        gameState.currentTurn = "CLOSED BY REFEREE";
-        io.emit('gameStateUpdate', gameState);
-    });
-
     socket.on('refReset', () => {
         if (socket.id !== gameState.refereeId) return;
         gameState.gameStarted = false;
         gameState.team1Picks = [];
         gameState.team2Picks = [];
+        gameState.team1Player = null;
+        gameState.team2Player = null;
+        // Set everyone back to spectators so you can pick new ones from chat
+        gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
     });
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+server.listen(PORT, () => { console.log(`Server is running on port ${PORT}`); });
