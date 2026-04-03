@@ -26,7 +26,7 @@ let gameState = {
     gameStarted: false,
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com/watch?v=YOUR_VIDEO_ID",
-    qrCodes: ["", "", "", "", "", ""] // 6 places for QR urls
+    qrCodes: ["", "", "", "", "", ""] 
 };
 
 io.on('connection', (socket) => {
@@ -75,7 +75,6 @@ io.on('connection', (socket) => {
         io.emit('gameStateUpdate', gameState);
     });
 
-    // New specific listener for QR slots
     socket.on('refUpdateQRs', (newQRs) => {
         if (socket.id !== gameState.refereeId) return;
         gameState.qrCodes = newQRs;
@@ -117,14 +116,8 @@ io.on('connection', (socket) => {
     socket.on('playerPickCard', (cardId) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || user.role !== gameState.currentTurn) return;
-
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
-            const isGK = card.pos === 'GK' || card.pos === 'Goal Keeper';
-            if (isGK && gameState[`${user.role}Picks`].some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
-                socket.emit('error', 'You already have a Goal Keeper!');
-                return;
-            }
             gameState[`${user.role}Picks`].push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
             gameState.currentTurn = gameState.currentTurn === "team1" ? "team2" : "team1";
