@@ -26,8 +26,7 @@ let gameState = {
     gameStarted: false,
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com/watch?v=YOUR_VIDEO_ID",
-    customLink: { text: "Visit Our Shop", url: "#" }, // New Clickable Link
-    qrCodes: ["", "", "", "", "", ""] // 6 Places for QR Code Image URLs
+    qrCodes: ["", "", "", "", "", ""] // 6 places for QR urls
 };
 
 io.on('connection', (socket) => {
@@ -51,6 +50,7 @@ io.on('connection', (socket) => {
         try {
             const sentinelUrl = `https://script.google.com/macros/s/AKfycbzvG5wJmLfTAjKwIzSINNWQwWkEM3urFYdyWXuM2zhmHcMYKOh5tQCyvdtsv0xptkeX/exec?code=${txId}&name=${name}`;
             const response = await axios.get(sentinelUrl);
+
             if (response.data.valid) {
                 const existingViewer = gameState.allViewers.find(v => v.name === name);
                 if (existingViewer) {
@@ -69,17 +69,16 @@ io.on('connection', (socket) => {
         }
     });
 
-    // NEW: Update QR Codes and Custom Link
-    socket.on('refUpdateExtraInfo', (data) => {
-        if (socket.id !== gameState.refereeId) return;
-        if (data.qrCodes) gameState.qrCodes = data.qrCodes;
-        if (data.customLink) gameState.customLink = data.customLink;
-        io.emit('gameStateUpdate', gameState);
-    });
-
     socket.on('refUpdateYoutube', (newLink) => {
         if (socket.id !== gameState.refereeId) return;
         gameState.youtubeLink = newLink;
+        io.emit('gameStateUpdate', gameState);
+    });
+
+    // New specific listener for QR slots
+    socket.on('refUpdateQRs', (newQRs) => {
+        if (socket.id !== gameState.refereeId) return;
+        gameState.qrCodes = newQRs;
         io.emit('gameStateUpdate', gameState);
     });
 
@@ -118,6 +117,7 @@ io.on('connection', (socket) => {
     socket.on('playerPickCard', (cardId) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || user.role !== gameState.currentTurn) return;
+
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
             const isGK = card.pos === 'GK' || card.pos === 'Goal Keeper';
