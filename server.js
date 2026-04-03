@@ -21,11 +21,11 @@ let gameState = {
     team1Player: null,   
     team2Player: null,   
     currentTurn: "team1",
-    matchType: 1,
+    matchType: 11,
     maxPicks: 11,
     gameStarted: false,
     secretRefToken: "eric_ref_2024",
-    youtubeLink: "https://www.youtube.com/watch?v=YOUR_VIDEO_ID",
+    youtubeLink: "https://www.youtube.com",
     qrCodes: ["", "", "", "", "", ""] 
 };
 
@@ -55,9 +55,7 @@ io.on('connection', (socket) => {
                 const existingViewer = gameState.allViewers.find(v => v.name === name);
                 if (existingViewer) {
                     existingViewer.id = socket.id;
-                    existingViewer.txId = txId;
                 } else {
-                    gameState.authorizedNames.push(name);
                     gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId });
                 }
                 io.emit('gameStateUpdate', gameState);
@@ -81,12 +79,6 @@ io.on('connection', (socket) => {
         io.emit('gameStateUpdate', gameState);
     });
 
-    socket.on('refToggleLobby', () => {
-        if (socket.id !== gameState.refereeId) return;
-        gameState.lobbyOpen = !gameState.lobbyOpen;
-        io.emit('gameStateUpdate', gameState);
-    });
-
     socket.on('refAssignRole', (data) => {
         if (socket.id !== gameState.refereeId) return;
         const user = gameState.allViewers.find(v => v.id === data.userId);
@@ -104,7 +96,6 @@ io.on('connection', (socket) => {
             const response = await axios.get(process.env.SHEET_URL);
             let allCards = await csv().fromString(response.data);
             gameState.availableCards = allCards.slice(0, 100); 
-            gameState.matchType = config.teamSize || 1;
             gameState.gameStarted = true;
             gameState.team1Picks = [];
             gameState.team2Picks = [];
