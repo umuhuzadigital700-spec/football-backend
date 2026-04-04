@@ -12,6 +12,7 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 let gameState = {
     refereeId: null,
+    lobbyOpen: false,
     allViewers: [],      
     availableCards: [],
     team1Picks: [],
@@ -19,6 +20,7 @@ let gameState = {
     team1Player: null,   
     team2Player: null,   
     currentTurn: "team1",
+    matchType: 11,
     gameStarted: false,
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
@@ -124,6 +126,8 @@ io.on('connection', (socket) => {
         gameState.team1Picks = [];
         gameState.team2Picks = [];
         gameState.currentTurn = "team1";
+        gameState.team1Player = null;
+        gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
     });
@@ -132,9 +136,14 @@ io.on('connection', (socket) => {
         if (socket.id !== gameState.refereeId) return;
         gameState.allViewers = [];
         gameState.gameStarted = false;
+        gameState.team1Picks = [];
+        gameState.team2Picks = [];
+        gameState.team1Player = null;
+        gameState.team2Player = null;
         io.emit('clearArenaForce');
         io.emit('gameStateUpdate', gameState);
     });
 });
 
-server.listen(process.env.PORT || 5000);
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
