@@ -125,7 +125,7 @@ io.on('connection', (socket) => {
             const t1Full = gameState.team1Picks.length >= 11;
             const t2Full = gameState.team2Picks.length >= 11;
 
-            if (t1Picks >= 11 && t2Picks >= 11) {
+            if (t1Full && t2Full) {
                 gameState.currentTurn = "FINISHED";
             } else if (user.role === "team1") {
                 gameState.currentTurn = t2Full ? "team1" : "team2";
