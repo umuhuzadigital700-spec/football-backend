@@ -90,7 +90,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('refStartDraft', async (config) => {
+    socket.on('refStartDraft', async () => {
         if (socket.id !== gameState.refereeId) return;
         try {
             const response = await axios.get(process.env.SHEET_URL);
@@ -107,11 +107,23 @@ io.on('connection', (socket) => {
     socket.on('playerPickCard', (cardId) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || user.role !== gameState.currentTurn) return;
+        
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
+            // GOALKEEPER LIMIT CHECK
+            const isGK = card.pos === 'GK' || card.pos === 'Goal Keeper';
+            const teamPicks = gameState[`${user.role}Picks`];
+            if (isGK && teamPicks.some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
+                socket.emit('error', 'Team already has a Goal Keeper!');
+                return;
+            }
+
             gameState[`${user.role}Picks`].push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
+            
+            // SWITCH TURNS
             gameState.currentTurn = gameState.currentTurn === "team1" ? "team2" : "team1";
+            
             if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
                 gameState.currentTurn = "FINISHED";
             }
@@ -127,6 +139,20 @@ io.on('connection', (socket) => {
         gameState.team1Player = null;
         gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
+        io.emit('gameStateUpdate', gameState);
+    });
+
+    // COMMAND 3: CLEAR ARENA (FORCE EVERYONE OUT)
+    socket.on('refClearArena', () => {
+        if (socket.id !== gameState.refereeId) return;
+        gameState.allViewers = [];
+        gameState.authorizedNames = [];
+        gameState.gameStarted = false;
+        gameState.team1Picks = [];
+        gameState.team2Picks = [];
+        gameState.team1Player = null;
+        gameState.team2Player = null;
+        io.emit('clearArenaForce'); // Special event to force client redirect
         io.emit('gameStateUpdate', gameState);
     });
 });
