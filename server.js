@@ -110,6 +110,12 @@ io.on('connection', (socket) => {
         
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
+            // Check if team is already full (11 players)
+            if (gameState[`${user.role}Picks`].length >= 11) {
+                socket.emit('error', 'Your team is already full!');
+                return;
+            }
+
             // GOALKEEPER LIMIT CHECK
             const isGK = card.pos === 'GK' || card.pos === 'Goal Keeper';
             const teamPicks = gameState[`${user.role}Picks`];
@@ -121,12 +127,16 @@ io.on('connection', (socket) => {
             gameState[`${user.role}Picks`].push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
             
-            // SWITCH TURNS
-            gameState.currentTurn = gameState.currentTurn === "team1" ? "team2" : "team1";
-            
+            // SWITCH TURNS ONLY IF THE OTHER TEAM STILL NEEDS PLAYERS
             if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
                 gameState.currentTurn = "FINISHED";
+            } else if (user.role === "team1" && gameState.team2Picks.length < 11) {
+                gameState.currentTurn = "team2";
+            } else if (user.role === "team2" && gameState.team1Picks.length < 11) {
+                gameState.currentTurn = "team1";
             }
+            // If the next team is already full, the current player stays active to finish their 11
+            
             io.emit('gameStateUpdate', gameState);
         }
     });
@@ -142,7 +152,6 @@ io.on('connection', (socket) => {
         io.emit('gameStateUpdate', gameState);
     });
 
-    // COMMAND 3: CLEAR ARENA (FORCE EVERYONE OUT)
     socket.on('refClearArena', () => {
         if (socket.id !== gameState.refereeId) return;
         gameState.allViewers = [];
@@ -152,7 +161,7 @@ io.on('connection', (socket) => {
         gameState.team2Picks = [];
         gameState.team1Player = null;
         gameState.team2Player = null;
-        io.emit('clearArenaForce'); // Special event to force client redirect
+        io.emit('clearArenaForce'); 
         io.emit('gameStateUpdate', gameState);
     });
 });
