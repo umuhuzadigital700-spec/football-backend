@@ -110,31 +110,27 @@ io.on('connection', (socket) => {
         
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
-            // Check if full
             if (gameState[`${user.role}Picks`].length >= 11) return;
 
-            // GK Check
             const isGK = card.pos === 'GK' || card.pos === 'Goal Keeper';
-            if (isGK && gameState[`${user.role}Picks`].some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
+            const currentPicks = gameState[`${user.role}Picks`];
+            if (isGK && currentPicks.some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
                 socket.emit('error', 'Team already has a Goal Keeper!');
                 return;
             }
 
-            // Execute Pick
             gameState[`${user.role}Picks`].push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
             
-            // Logic to switch turns or finish
-            const nextTurn = (user.role === "team1") ? "team2" : "team1";
-            const currentTeamFull = gameState[`${user.role}Picks`].length >= 11;
-            const nextTeamFull = gameState[`${nextTurn}Picks`].length >= 11;
+            const t1Full = gameState.team1Picks.length >= 11;
+            const t2Full = gameState.team2Picks.length >= 11;
 
-            if (currentTeamFull && nextTeamFull) {
+            if (t1Picks >= 11 && t2Picks >= 11) {
                 gameState.currentTurn = "FINISHED";
-            } else if (nextTeamFull) {
-                gameState.currentTurn = user.role; // Stay with current player if other is full
+            } else if (user.role === "team1") {
+                gameState.currentTurn = t2Full ? "team1" : "team2";
             } else {
-                gameState.currentTurn = nextTurn; // Standard switch
+                gameState.currentTurn = t1Full ? "team2" : "team1";
             }
             
             io.emit('gameStateUpdate', gameState);
@@ -147,9 +143,9 @@ io.on('connection', (socket) => {
         gameState.team1Picks = [];
         gameState.team2Picks = [];
         gameState.currentTurn = "team1";
-        gameState.allViewers.forEach(v => v.role = 'spectator');
         gameState.team1Player = null;
         gameState.team2Player = null;
+        gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
     });
 
