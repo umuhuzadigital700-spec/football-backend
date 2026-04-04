@@ -12,7 +12,6 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 let gameState = {
     refereeId: null,
-    lobbyOpen: false,
     allViewers: [],      
     availableCards: [],
     team1Picks: [],
@@ -20,7 +19,6 @@ let gameState = {
     team1Player: null,   
     team2Player: null,   
     currentTurn: "team1",
-    matchType: 11,
     gameStarted: false,
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
@@ -92,46 +90,30 @@ io.on('connection', (socket) => {
 
     socket.on('playerPickCard', (cardId) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
-        
-        // RE-VERIFY: Only the person whose turn it actually is can proceed
-        if (!user || user.role !== gameState.currentTurn) {
-            socket.emit('error', "Wait for your turn!");
-            return;
-        }
+        if (!user || user.role !== gameState.currentTurn) return;
         
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
-            const myTeamPicks = gameState[`${user.role}Picks`];
-            
-            // Limit check
-            if (myTeamPicks.length >= 11) return;
+            const myTeam = user.role === 'team1' ? gameState.team1Picks : gameState.team2Picks;
+            if (myTeam.length >= 11) return;
 
-            // Goal Keeper check
             const isGK = card.pos?.toUpperCase().includes("GK");
-            if (isGK && myTeamPicks.some(p => p.pos?.toUpperCase().includes("GK"))) {
-                socket.emit('error', 'Team already has a Goal Keeper!');
+            if (isGK && myTeam.some(p => p.pos?.toUpperCase().includes("GK"))) {
+                socket.emit('error', 'Only 1 GK allowed!');
                 return;
             }
 
-            // PERFORM THE PICK
-            gameState[`${user.role}Picks`].push(card);
+            myTeam.push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
             
-            // CALCULATE NEXT TURN
-            const t1Count = gameState.team1Picks.length;
-            const t2Count = gameState.team2Picks.length;
-
-            if (t1Count >= 11 && t2Count >= 11) {
-                gameState.currentTurn = "FINISHED";
-            } else if (user.role === "team1") {
-                // If Team 2 is not full, it's their turn. Otherwise, stay with Team 1.
-                gameState.currentTurn = (t2Count < 11) ? "team2" : "team1";
-            } else {
-                // If Team 1 is not full, it's their turn. Otherwise, stay with Team 2.
-                gameState.currentTurn = (t1Count < 11) ? "team1" : "team2";
-            }
+            const otherTeam = user.role === 'team1' ? 'team2' : 'team1';
+            const otherPicks = user.role === 'team1' ? gameState.team2Picks : gameState.team1Picks;
             
-            // BROADCAST TO ALL: This forces every phone to unfreeze
+            if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
+                gameState.currentTurn = "FINISHED";
+            } else {
+                gameState.currentTurn = (otherPicks.length < 11) ? otherTeam : user.role;
+            }
             io.emit('gameStateUpdate', gameState);
         }
     });
