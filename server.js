@@ -150,18 +150,16 @@ socket.on('playerPickCard', (cardId) => {
         }
     });
 
-    // AFTER — add currentTurn reset
-socket.on('refReset', () => {
-    if (socket.id !== gameState.refereeId) return;
-    gameState.gameStarted = false;
-    gameState.team1Picks = [];
-    gameState.team2Picks = [];
-    gameState.team1Player = null;
-    gameState.team2Player = null;
-    gameState.currentTurn = "team1"; // ← ADD THIS ONE LINE
-    gameState.allViewers.forEach(v => v.role = 'spectator');
-    io.emit('gameStateUpdate', gameState);
-});
+    socket.on('refReset', () => {
+        if (socket.id !== gameState.refereeId) return;
+        gameState.gameStarted = false;
+        gameState.team1Picks = [];
+        gameState.team2Picks = [];
+        gameState.team1Player = null;
+        gameState.team2Player = null;
+        gameState.allViewers.forEach(v => v.role = 'spectator');
+        io.emit('gameStateUpdate', gameState);
+    });
 
     socket.on('refClearArena', () => {
         if (socket.id !== gameState.refereeId) return;
