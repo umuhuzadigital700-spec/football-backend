@@ -104,7 +104,8 @@ io.on('connection', (socket) => {
         } catch (e) { console.log("Fetch Error"); }
     });
 
-    socket.on('playerPickCard', (cardId) => {
+    // Inside playerPickCard in server.js
+socket.on('playerPickCard', (cardId) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         
         // Safety Check: Is it actually this user's turn?
@@ -112,7 +113,7 @@ io.on('connection', (socket) => {
         
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
-            // 1. Check if team is full
+            // 1. Check if the team is already full (stops at 11)
             if (gameState[`${user.role}Picks`].length >= 11) {
                 socket.emit('error', 'Your team is already full!');
                 return;
@@ -130,19 +131,21 @@ io.on('connection', (socket) => {
             gameState[`${user.role}Picks`].push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
             
-            // 4. Handle turn switching
+            // 4. SMART TURN SWITCH (Prevents freezing)
             const t1Picks = gameState.team1Picks.length;
             const t2Picks = gameState.team2Picks.length;
 
             if (t1Picks >= 11 && t2Picks >= 11) {
                 gameState.currentTurn = "FINISHED";
             } else if (user.role === "team1") {
+                // Switch to team2 only if team2 still needs players
                 gameState.currentTurn = (t2Picks < 11) ? "team2" : "team1";
             } else if (user.role === "team2") {
+                // Switch to team1 only if team1 still needs players
                 gameState.currentTurn = (t1Picks < 11) ? "team1" : "team2";
             }
             
-            // 5. Broadcast update to everyone immediately
+            // 5. Force update to all screens
             io.emit('gameStateUpdate', gameState);
         }
     });
@@ -174,3 +177,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => { console.log(`Server is running on port ${PORT}`); });
+
+
