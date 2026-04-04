@@ -104,42 +104,47 @@ io.on('connection', (socket) => {
         } catch (e) { console.log("Fetch Error"); }
     });
 
-    socket.on('playerPickCard', (cardId) => {
-        const user = gameState.allViewers.find(v => v.id === socket.id);
-        if (!user || user.role !== gameState.currentTurn) return;
-        
-        const card = gameState.availableCards.find(c => c.id === cardId);
-        if (card) {
-            // Check if team is already full (11 players)
-            if (gameState[`${user.role}Picks`].length >= 11) {
-                socket.emit('error', 'Your team is already full!');
-                return;
-            }
-
-            // GOALKEEPER LIMIT CHECK
-            const isGK = card.pos === 'GK' || card.pos === 'Goal Keeper';
-            const teamPicks = gameState[`${user.role}Picks`];
-            if (isGK && teamPicks.some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
-                socket.emit('error', 'Team already has a Goal Keeper!');
-                return;
-            }
-
-            gameState[`${user.role}Picks`].push(card);
-            gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
-            
-            // SWITCH TURNS ONLY IF THE OTHER TEAM STILL NEEDS PLAYERS
-            if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
-                gameState.currentTurn = "FINISHED";
-            } else if (user.role === "team1" && gameState.team2Picks.length < 11) {
-                gameState.currentTurn = "team2";
-            } else if (user.role === "team2" && gameState.team1Picks.length < 11) {
-                gameState.currentTurn = "team1";
-            }
-            // If the next team is already full, the current player stays active to finish their 11
-            
-            io.emit('gameStateUpdate', gameState);
+    // Inside playerPickCard in server.js
+socket.on('playerPickCard', (cardId) => {
+    const user = gameState.allViewers.find(v => v.id === socket.id);
+    if (!user || user.role !== gameState.currentTurn) return;
+    
+    const card = gameState.availableCards.find(c => c.id === cardId);
+    if (card) {
+        // 1. Check if the active team is already full
+        if (gameState[`${user.role}Picks`].length >= 11) {
+            socket.emit('error', 'Your team is already full!');
+            return;
         }
-    });
+
+        // 2. Goal Keeper check (Keep your logic)
+        const isGK = card.pos === 'GK' || card.pos === 'Goal Keeper';
+        if (isGK && gameState[`${user.role}Picks`].some(p => p.pos === 'GK' || p.pos === 'Goal Keeper')) {
+            socket.emit('error', 'Team already has a Goal Keeper!');
+            return;
+        }
+
+        // 3. Add the card
+        gameState[`${user.role}Picks`].push(card);
+        gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
+        
+        // 4. SMART TURN SWITCH (Prevents freezing)
+        const team1Full = gameState.team1Picks.length >= 11;
+        const team2Full = gameState.team2Picks.length >= 11;
+
+        if (team1Full && team2Full) {
+            gameState.currentTurn = "FINISHED";
+        } else if (user.role === "team1") {
+            // Switch to team2 unless team2 is already full
+            gameState.currentTurn = team2Full ? "team1" : "team2";
+        } else if (user.role === "team2") {
+            // Switch to team1 unless team1 is already full
+            gameState.currentTurn = team1Full ? "team2" : "team1";
+        }
+        
+        io.emit('gameStateUpdate', gameState);
+    }
+});
 
     socket.on('refReset', () => {
         if (socket.id !== gameState.refereeId) return;
