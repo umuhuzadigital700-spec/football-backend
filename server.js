@@ -126,19 +126,16 @@ io.on('connection', (socket) => {
 
             gameState[`${user.role}Picks`].push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
-
-            const team1Full = gameState.team1Picks.length >= 11;
-            const team2Full = gameState.team2Picks.length >= 11;
-
-            if (team1Full && team2Full) {
+            
+            // SWITCH TURNS ONLY IF THE OTHER TEAM STILL NEEDS PLAYERS
+            if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
                 gameState.currentTurn = "FINISHED";
-            } else if (team1Full) {
+            } else if (user.role === "team1" && gameState.team2Picks.length < 11) {
                 gameState.currentTurn = "team2";
-            } else if (team2Full) {
+            } else if (user.role === "team2" && gameState.team1Picks.length < 11) {
                 gameState.currentTurn = "team1";
-            } else {
-                gameState.currentTurn = user.role === "team1" ? "team2" : "team1";
             }
+            // If the next team is already full, the current player stays active to finish their 11
             
             io.emit('gameStateUpdate', gameState);
         }
