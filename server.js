@@ -93,24 +93,19 @@ io.on('connection', (socket) => {
     socket.on('playerPickCard', (cardId) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || user.role !== gameState.currentTurn) return;
-        
         const card = gameState.availableCards.find(c => c.id === cardId);
         if (card) {
             const myTeam = user.role === 'team1' ? gameState.team1Picks : gameState.team2Picks;
             if (myTeam.length >= 11) return;
-
             const isGK = card.pos?.toUpperCase().includes("GK");
             if (isGK && myTeam.some(p => p.pos?.toUpperCase().includes("GK"))) {
                 socket.emit('error', 'Only 1 GK allowed!');
                 return;
             }
-
             myTeam.push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
-            
             const otherTeam = user.role === 'team1' ? 'team2' : 'team1';
             const otherPicks = user.role === 'team1' ? gameState.team2Picks : gameState.team1Picks;
-            
             if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
                 gameState.currentTurn = "FINISHED";
             } else {
