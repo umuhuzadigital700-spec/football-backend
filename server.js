@@ -25,7 +25,6 @@ let gameState = {
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
     qrCodes: ["", "", "", "", "", ""],
-    // New Tactical Data
     team1Formation: "4-4-2",
     team2Formation: "4-4-2",
     team1Tactics: {}, 
@@ -104,11 +103,6 @@ io.on('connection', (socket) => {
         if (card) {
             const myTeam = user.role === 'team1' ? gameState.team1Picks : gameState.team2Picks;
             if (myTeam.length >= 11) return;
-            const isGK = card.pos?.toUpperCase().includes("GK");
-            if (isGK && myTeam.some(p => p.pos?.toUpperCase().includes("GK"))) {
-                socket.emit('error', 'Only 1 GK allowed!');
-                return;
-            }
             myTeam.push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
             const otherTeam = user.role === 'team1' ? 'team2' : 'team1';
@@ -122,18 +116,14 @@ io.on('connection', (socket) => {
         }
     });
 
-    // --- NEW TACTICAL LISTENERS ---
     socket.on('playerSetPosition', (data) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || !user.role.startsWith('team')) return;
-        const teamKey = user.role;
-        const picks = gameState[`${teamKey}Picks`];
-        const tactics = gameState[`${teamKey}Tactics`];
+        const tactics = gameState[`${user.role}Tactics`];
+        const picks = gameState[`${user.role}Picks`];
         const card = picks.find(p => p.id === data.cardId);
         if (card) {
-            Object.keys(tactics).forEach(key => {
-                if (tactics[key].id === data.cardId) delete tactics[key];
-            });
+            Object.keys(tactics).forEach(k => { if (tactics[k].id === data.cardId) delete tactics[k]; });
             tactics[data.slotIndex] = card;
             io.emit('gameStateUpdate', gameState);
         }
@@ -143,10 +133,9 @@ io.on('connection', (socket) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || !user.role.startsWith('team')) return;
         gameState[`${user.role}Formation`] = formation;
-        gameState[`${user.role}Tactics`] = {}; 
+        gameState[`${user.role}Tactics`] = {};
         io.emit('gameStateUpdate', gameState);
     });
-    // ------------------------------
 
     socket.on('refReset', () => {
         if (socket.id !== gameState.refereeId) return;
@@ -156,8 +145,6 @@ io.on('connection', (socket) => {
         gameState.team1Tactics = {};
         gameState.team2Tactics = {};
         gameState.currentTurn = "team1";
-        gameState.team1Player = null;
-        gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
     });
@@ -166,16 +153,9 @@ io.on('connection', (socket) => {
         if (socket.id !== gameState.refereeId) return;
         gameState.allViewers = [];
         gameState.gameStarted = false;
-        gameState.team1Picks = [];
-        gameState.team2Picks = [];
-        gameState.team1Tactics = {};
-        gameState.team2Tactics = {};
-        gameState.team1Player = null;
-        gameState.team2Player = null;
         io.emit('clearArenaForce');
         io.emit('gameStateUpdate', gameState);
     });
 });
 
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+server.listen(process.env.PORT || 5000);
