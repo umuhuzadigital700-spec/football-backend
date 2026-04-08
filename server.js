@@ -12,7 +12,6 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 let gameState = {
     refereeId: null,
-    lobbyOpen: false,
     allViewers: [],      
     availableCards: [],
     team1Picks: [],
@@ -20,7 +19,6 @@ let gameState = {
     team1Player: null,   
     team2Player: null,   
     currentTurn: "team1",
-    matchType: 11,
     gameStarted: false,
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
