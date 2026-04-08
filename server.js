@@ -25,10 +25,9 @@ let gameState = {
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
     qrCodes: ["", "", "", "", "", ""],
-    // New Tactical Storage
     team1Formation: "4-4-2",
     team2Formation: "4-4-2",
-    team1Tactics: {}, // Stores { slotIndex: cardObject }
+    team1Tactics: {}, 
     team2Tactics: {}
 };
 
@@ -139,7 +138,7 @@ io.on('connection', (socket) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || !user.role.startsWith('team')) return;
         gameState[`${user.role}Formation`] = formation;
-        gameState[`${user.role}Tactics`] = {}; 
+        gameState[`${user.role}Tactics`] = {};
         io.emit('gameStateUpdate', gameState);
     });
 
@@ -155,6 +154,7 @@ io.on('connection', (socket) => {
         gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
+        io.emit('forceRefreshState');
     });
 
     socket.on('refClearArena', () => {
@@ -163,6 +163,8 @@ io.on('connection', (socket) => {
         gameState.gameStarted = false;
         gameState.team1Picks = [];
         gameState.team2Picks = [];
+        gameState.team1Tactics = {};
+        gameState.team2Tactics = {};
         gameState.team1Player = null;
         gameState.team2Player = null;
         io.emit('clearArenaForce');
