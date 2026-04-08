@@ -20,7 +20,7 @@ let gameState = {
     team2Player: null,   
     currentTurn: "team1",
     gameStarted: false,
-    matchLocked: false, // Prevents tactical changes
+    matchLocked: false, 
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
     qrCodes: ["", "", "", "", "", ""],
@@ -42,24 +42,32 @@ io.on('connection', (socket) => {
     });
 
     socket.on('joinWaitingRoom', async (data) => {
-        const name = data.name.trim();
+        const name = data.name ? data.name.trim() : "";
         const txId = data.ticketCode ? data.ticketCode.trim() : "";
-        if (!txId || !name) return;
+        if (!txId || !name) return socket.emit('error', 'Fields cannot be empty');
 
-        // Login rule: Prevent double login with same TxID
-        const alreadyIn = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
-        if (alreadyIn) return socket.emit('error', 'This ticket is already in use elsewhere.');
+        // Prevent double login with same TxID
+        const active = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
+        if (active) return socket.emit('error', 'This TDX-ID is already active in the arena.');
 
         try {
-            const sentinelUrl = `https://script.google.com/macros/s/AKfycbzvG5wJmLfTAjKwIzSINNWQwWkEM3urFYdyWXuM2zhmHcMYKOh5tQCyvdtsv0xptkeX/exec?code=${txId}&name=${name}`;
-            const response = await axios.get(sentinelUrl);
-            if (response.data.valid) {
-                const existing = gameState.allViewers.find(v => v.name === name);
-                if (existing) { existing.id = socket.id; } 
-                else { gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); }
+            const sentinelUrl = `https://script.google.com/macros/s/AKfycbzvG5wJmLfTAjKwIzSINNWQwWkEM3urFYdyWXuM2zhmHcMYKOh5tQCyvdtsv0xptkeX/exec?code=${txId}&name=${encodeURIComponent(name)}`;
+            const response = await axios.get(sentinelUrl, { maxRedirects: 5 });
+            
+            if (response.data && response.data.valid) {
+                const existing = gameState.allViewers.find(v => v.txId === txId);
+                if (existing) { 
+                    existing.id = socket.id; 
+                } else { 
+                    gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); 
+                }
                 io.emit('gameStateUpdate', gameState);
-            } else { socket.emit('error', 'Payment not verified.'); }
-        } catch (e) { socket.emit('error', 'System Busy'); }
+            } else { 
+                socket.emit('error', 'Payment not found or TDX-ID invalid.'); 
+            }
+        } catch (e) { 
+            socket.emit('error', 'Verification System Offline.'); 
+        }
     });
 
     socket.on('refUpdateYoutube', (link) => {
@@ -98,7 +106,7 @@ io.on('connection', (socket) => {
             gameState.team2Tactics = {};
             gameState.currentTurn = "team1";
             io.emit('gameStateUpdate', gameState);
-        } catch (e) { console.log("Sheet Error"); }
+        } catch (e) { console.log("Card Load Error"); }
     });
 
     socket.on('refLockMatch', () => {
@@ -128,11 +136,12 @@ io.on('connection', (socket) => {
     });
 
     socket.on('playerSetPosition', (data) => {
-        if (gameState.matchLocked) return; // Stop changes if locked
+        if (gameState.matchLocked) return;
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || !user.role.startsWith('team')) return;
         const tactics = gameState[`${user.role}Tactics`];
-        const card = gameState[`${user.role}Picks`].find(p => p.id === data.cardId);
+        const picks = gameState[`${user.role}Picks`];
+        const card = picks.find(p => p.id === data.cardId);
         if (card) {
             Object.keys(tactics).forEach(k => { if (tactics[k].id === data.cardId) delete tactics[k]; });
             tactics[data.slotIndex] = card;
@@ -151,7 +160,6 @@ io.on('connection', (socket) => {
 
     socket.on('refReset', () => {
         if (socket.id !== gameState.refereeId) return;
-        // Keep login, keep links, keep referee. Just reset roles and game.
         gameState.gameStarted = false;
         gameState.matchLocked = false;
         gameState.team1Picks = [];
@@ -163,7 +171,6 @@ io.on('connection', (socket) => {
         gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
-        io.emit('softReset'); // Only moves players to lobby
     });
 
     socket.on('refClearArena', () => {
