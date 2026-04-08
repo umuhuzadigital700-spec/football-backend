@@ -20,6 +20,7 @@ let gameState = {
     team2Player: null,   
     currentTurn: "team1",
     gameStarted: false,
+    matchLocked: false, // Prevents tactical changes
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
     qrCodes: ["", "", "", "", "", ""],
@@ -44,6 +45,11 @@ io.on('connection', (socket) => {
         const name = data.name.trim();
         const txId = data.ticketCode ? data.ticketCode.trim() : "";
         if (!txId || !name) return;
+
+        // Login rule: Prevent double login with same TxID
+        const alreadyIn = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
+        if (alreadyIn) return socket.emit('error', 'This ticket is already in use elsewhere.');
+
         try {
             const sentinelUrl = `https://script.google.com/macros/s/AKfycbzvG5wJmLfTAjKwIzSINNWQwWkEM3urFYdyWXuM2zhmHcMYKOh5tQCyvdtsv0xptkeX/exec?code=${txId}&name=${name}`;
             const response = await axios.get(sentinelUrl);
@@ -85,6 +91,7 @@ io.on('connection', (socket) => {
             const response = await axios.get(process.env.SHEET_URL);
             gameState.availableCards = (await csv().fromString(response.data)).slice(0, 100);
             gameState.gameStarted = true;
+            gameState.matchLocked = false;
             gameState.team1Picks = [];
             gameState.team2Picks = [];
             gameState.team1Tactics = {};
@@ -92,6 +99,12 @@ io.on('connection', (socket) => {
             gameState.currentTurn = "team1";
             io.emit('gameStateUpdate', gameState);
         } catch (e) { console.log("Sheet Error"); }
+    });
+
+    socket.on('refLockMatch', () => {
+        if (socket.id !== gameState.refereeId) return;
+        gameState.matchLocked = true;
+        io.emit('gameStateUpdate', gameState);
     });
 
     socket.on('playerPickCard', (cardId) => {
@@ -115,11 +128,11 @@ io.on('connection', (socket) => {
     });
 
     socket.on('playerSetPosition', (data) => {
+        if (gameState.matchLocked) return; // Stop changes if locked
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || !user.role.startsWith('team')) return;
         const tactics = gameState[`${user.role}Tactics`];
-        const picks = gameState[`${user.role}Picks`];
-        const card = picks.find(p => p.id === data.cardId);
+        const card = gameState[`${user.role}Picks`].find(p => p.id === data.cardId);
         if (card) {
             Object.keys(tactics).forEach(k => { if (tactics[k].id === data.cardId) delete tactics[k]; });
             tactics[data.slotIndex] = card;
@@ -128,6 +141,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('playerSetFormation', (formation) => {
+        if (gameState.matchLocked) return;
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || !user.role.startsWith('team')) return;
         gameState[`${user.role}Formation`] = formation;
@@ -137,7 +151,9 @@ io.on('connection', (socket) => {
 
     socket.on('refReset', () => {
         if (socket.id !== gameState.refereeId) return;
+        // Keep login, keep links, keep referee. Just reset roles and game.
         gameState.gameStarted = false;
+        gameState.matchLocked = false;
         gameState.team1Picks = [];
         gameState.team2Picks = [];
         gameState.team1Tactics = {};
@@ -147,13 +163,15 @@ io.on('connection', (socket) => {
         gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
-        io.emit('forceRefreshState');
+        io.emit('softReset'); // Only moves players to lobby
     });
 
     socket.on('refClearArena', () => {
         if (socket.id !== gameState.refereeId) return;
         gameState.allViewers = [];
         gameState.gameStarted = false;
+        gameState.qrCodes = ["", "", "", "", "", ""];
+        gameState.youtubeLink = "https://www.youtube.com";
         io.emit('clearArenaForce');
         io.emit('gameStateUpdate', gameState);
     });
