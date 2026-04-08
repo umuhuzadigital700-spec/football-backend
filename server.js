@@ -24,7 +24,12 @@ let gameState = {
     gameStarted: false,
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
-    qrCodes: ["", "", "", "", "", ""] 
+    qrCodes: ["", "", "", "", "", ""],
+    // New Tactical Data
+    team1Formation: "4-4-2",
+    team2Formation: "4-4-2",
+    team1Tactics: {}, 
+    team2Tactics: {}
 };
 
 io.on('connection', (socket) => {
@@ -85,6 +90,8 @@ io.on('connection', (socket) => {
             gameState.gameStarted = true;
             gameState.team1Picks = [];
             gameState.team2Picks = [];
+            gameState.team1Tactics = {};
+            gameState.team2Tactics = {};
             gameState.currentTurn = "team1";
             io.emit('gameStateUpdate', gameState);
         } catch (e) { console.log("Sheet Error"); }
@@ -115,11 +122,39 @@ io.on('connection', (socket) => {
         }
     });
 
+    // --- NEW TACTICAL LISTENERS ---
+    socket.on('playerSetPosition', (data) => {
+        const user = gameState.allViewers.find(v => v.id === socket.id);
+        if (!user || !user.role.startsWith('team')) return;
+        const teamKey = user.role;
+        const picks = gameState[`${teamKey}Picks`];
+        const tactics = gameState[`${teamKey}Tactics`];
+        const card = picks.find(p => p.id === data.cardId);
+        if (card) {
+            Object.keys(tactics).forEach(key => {
+                if (tactics[key].id === data.cardId) delete tactics[key];
+            });
+            tactics[data.slotIndex] = card;
+            io.emit('gameStateUpdate', gameState);
+        }
+    });
+
+    socket.on('playerSetFormation', (formation) => {
+        const user = gameState.allViewers.find(v => v.id === socket.id);
+        if (!user || !user.role.startsWith('team')) return;
+        gameState[`${user.role}Formation`] = formation;
+        gameState[`${user.role}Tactics`] = {}; 
+        io.emit('gameStateUpdate', gameState);
+    });
+    // ------------------------------
+
     socket.on('refReset', () => {
         if (socket.id !== gameState.refereeId) return;
         gameState.gameStarted = false;
         gameState.team1Picks = [];
         gameState.team2Picks = [];
+        gameState.team1Tactics = {};
+        gameState.team2Tactics = {};
         gameState.currentTurn = "team1";
         gameState.team1Player = null;
         gameState.team2Player = null;
@@ -133,6 +168,8 @@ io.on('connection', (socket) => {
         gameState.gameStarted = false;
         gameState.team1Picks = [];
         gameState.team2Picks = [];
+        gameState.team1Tactics = {};
+        gameState.team2Tactics = {};
         gameState.team1Player = null;
         gameState.team2Player = null;
         io.emit('clearArenaForce');
