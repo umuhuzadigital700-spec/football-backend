@@ -42,13 +42,13 @@ io.on('connection', (socket) => {
     });
 
     socket.on('joinWaitingRoom', async (data) => {
-        const name = data.name ? data.name.trim() : "";
-        const txId = data.ticketCode ? data.ticketCode.trim() : "";
-        if (!txId || !name) return socket.emit('error', 'Fields cannot be empty');
+        const name = data.name.trim();
+        const txId = data.ticketCode.trim();
+        if (!txId || !name) return;
 
-        // Prevent double login with same TxID
+        // Login Rule: Prevent double login with same TxID
         const active = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
-        if (active) return socket.emit('error', 'This TDX-ID is already active in the arena.');
+        if (active) return socket.emit('error', 'This TDX-ID is already active.');
 
         try {
             const sentinelUrl = `https://script.google.com/macros/s/AKfycbzvG5wJmLfTAjKwIzSINNWQwWkEM3urFYdyWXuM2zhmHcMYKOh5tQCyvdtsv0xptkeX/exec?code=${txId}&name=${encodeURIComponent(name)}`;
@@ -56,17 +56,14 @@ io.on('connection', (socket) => {
             
             if (response.data && response.data.valid) {
                 const existing = gameState.allViewers.find(v => v.txId === txId);
-                if (existing) { 
-                    existing.id = socket.id; 
-                } else { 
-                    gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); 
-                }
+                if (existing) { existing.id = socket.id; } 
+                else { gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); }
                 io.emit('gameStateUpdate', gameState);
             } else { 
-                socket.emit('error', 'Payment not found or TDX-ID invalid.'); 
+                socket.emit('error', 'Payment not verified.'); 
             }
         } catch (e) { 
-            socket.emit('error', 'Verification System Offline.'); 
+            socket.emit('error', 'System Busy'); 
         }
     });
 
@@ -106,7 +103,7 @@ io.on('connection', (socket) => {
             gameState.team2Tactics = {};
             gameState.currentTurn = "team1";
             io.emit('gameStateUpdate', gameState);
-        } catch (e) { console.log("Card Load Error"); }
+        } catch (e) { console.log("Sheet Error"); }
     });
 
     socket.on('refLockMatch', () => {
@@ -171,6 +168,7 @@ io.on('connection', (socket) => {
         gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
+        io.emit('softReset'); 
     });
 
     socket.on('refClearArena', () => {
