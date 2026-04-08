@@ -25,6 +25,7 @@ let gameState = {
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
     qrCodes: ["", "", "", "", "", ""],
+    // Tactics Data
     team1Formation: "4-4-2",
     team2Formation: "4-4-2",
     team1Tactics: {}, 
@@ -145,6 +146,8 @@ io.on('connection', (socket) => {
         gameState.team1Tactics = {};
         gameState.team2Tactics = {};
         gameState.currentTurn = "team1";
+        gameState.team1Player = null;
+        gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
     });
@@ -158,4 +161,5 @@ io.on('connection', (socket) => {
     });
 });
 
-server.listen(process.env.PORT || 5000);
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
