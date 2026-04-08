@@ -25,10 +25,10 @@ let gameState = {
     secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
     qrCodes: ["", "", "", "", "", ""],
-    // Tactics Data
+    // New Tactical Storage
     team1Formation: "4-4-2",
     team2Formation: "4-4-2",
-    team1Tactics: {}, 
+    team1Tactics: {}, // Stores { slotIndex: cardObject }
     team2Tactics: {}
 };
 
@@ -104,6 +104,11 @@ io.on('connection', (socket) => {
         if (card) {
             const myTeam = user.role === 'team1' ? gameState.team1Picks : gameState.team2Picks;
             if (myTeam.length >= 11) return;
+            const isGK = card.pos?.toUpperCase().includes("GK");
+            if (isGK && myTeam.some(p => p.pos?.toUpperCase().includes("GK"))) {
+                socket.emit('error', 'Only 1 GK allowed!');
+                return;
+            }
             myTeam.push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
             const otherTeam = user.role === 'team1' ? 'team2' : 'team1';
@@ -134,7 +139,7 @@ io.on('connection', (socket) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || !user.role.startsWith('team')) return;
         gameState[`${user.role}Formation`] = formation;
-        gameState[`${user.role}Tactics`] = {};
+        gameState[`${user.role}Tactics`] = {}; 
         io.emit('gameStateUpdate', gameState);
     });
 
@@ -156,6 +161,10 @@ io.on('connection', (socket) => {
         if (socket.id !== gameState.refereeId) return;
         gameState.allViewers = [];
         gameState.gameStarted = false;
+        gameState.team1Picks = [];
+        gameState.team2Picks = [];
+        gameState.team1Player = null;
+        gameState.team2Player = null;
         io.emit('clearArenaForce');
         io.emit('gameStateUpdate', gameState);
     });
