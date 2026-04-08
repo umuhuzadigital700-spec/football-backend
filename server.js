@@ -103,11 +103,6 @@ io.on('connection', (socket) => {
         if (card) {
             const myTeam = user.role === 'team1' ? gameState.team1Picks : gameState.team2Picks;
             if (myTeam.length >= 11) return;
-            const isGK = card.pos?.toUpperCase().includes("GK");
-            if (isGK && myTeam.some(p => p.pos?.toUpperCase().includes("GK"))) {
-                socket.emit('error', 'Only 1 GK allowed!');
-                return;
-            }
             myTeam.push(card);
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
             const otherTeam = user.role === 'team1' ? 'team2' : 'team1';
@@ -161,12 +156,6 @@ io.on('connection', (socket) => {
         if (socket.id !== gameState.refereeId) return;
         gameState.allViewers = [];
         gameState.gameStarted = false;
-        gameState.team1Picks = [];
-        gameState.team2Picks = [];
-        gameState.team1Tactics = {};
-        gameState.team2Tactics = {};
-        gameState.team1Player = null;
-        gameState.team2Player = null;
         io.emit('clearArenaForce');
         io.emit('gameStateUpdate', gameState);
     });
