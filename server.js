@@ -43,28 +43,18 @@ io.on('connection', (socket) => {
 
     socket.on('joinWaitingRoom', async (data) => {
         const name = data.name.trim();
-        const txId = data.ticketCode.trim();
+        const txId = data.ticketCode ? data.ticketCode.trim() : "";
         if (!txId || !name) return;
-
-        // Login Rule: Prevent double login with same TxID
-        const active = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
-        if (active) return socket.emit('error', 'This TDX-ID is already active.');
-
         try {
             const sentinelUrl = `https://script.google.com/macros/s/AKfycbzvG5wJmLfTAjKwIzSINNWQwWkEM3urFYdyWXuM2zhmHcMYKOh5tQCyvdtsv0xptkeX/exec?code=${txId}&name=${encodeURIComponent(name)}`;
-            const response = await axios.get(sentinelUrl, { maxRedirects: 5 });
-            
-            if (response.data && response.data.valid) {
+            const response = await axios.get(sentinelUrl);
+            if (response.data.valid) {
                 const existing = gameState.allViewers.find(v => v.txId === txId);
-                if (existing) { existing.id = socket.id; } 
+                if (existing) { existing.id = socket.id; existing.name = name; } 
                 else { gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); }
                 io.emit('gameStateUpdate', gameState);
-            } else { 
-                socket.emit('error', 'Payment not verified.'); 
-            }
-        } catch (e) { 
-            socket.emit('error', 'System Busy'); 
-        }
+            } else { socket.emit('error', 'Payment not verified.'); }
+        } catch (e) { socket.emit('error', 'System Busy'); }
     });
 
     socket.on('refUpdateYoutube', (link) => {
@@ -103,7 +93,7 @@ io.on('connection', (socket) => {
             gameState.team2Tactics = {};
             gameState.currentTurn = "team1";
             io.emit('gameStateUpdate', gameState);
-        } catch (e) { console.log("Sheet Error"); }
+        } catch (e) { console.log("Draft Error"); }
     });
 
     socket.on('refLockMatch', () => {
@@ -137,8 +127,7 @@ io.on('connection', (socket) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || !user.role.startsWith('team')) return;
         const tactics = gameState[`${user.role}Tactics`];
-        const picks = gameState[`${user.role}Picks`];
-        const card = picks.find(p => p.id === data.cardId);
+        const card = gameState[`${user.role}Picks`].find(p => p.id === data.cardId);
         if (card) {
             Object.keys(tactics).forEach(k => { if (tactics[k].id === data.cardId) delete tactics[k]; });
             tactics[data.slotIndex] = card;
@@ -163,12 +152,11 @@ io.on('connection', (socket) => {
         gameState.team2Picks = [];
         gameState.team1Tactics = {};
         gameState.team2Tactics = {};
-        gameState.currentTurn = "team1";
         gameState.team1Player = null;
         gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
-        io.emit('softReset'); 
+        io.emit('forceResetUI');
     });
 
     socket.on('refClearArena', () => {
