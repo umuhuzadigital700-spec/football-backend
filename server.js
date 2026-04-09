@@ -10,7 +10,6 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// YOUR UPDATED GOOGLE SENTINEL URL
 const SENTINEL_URL = "https://script.google.com/macros/s/AKfycbzW_qRQsGYZQtyd_4eB27JXHYCJF__Ck33ki7P7xWqtZs84vye9uGIcNf_P31jFqrM3/exec";
 
 let gameState = {
@@ -24,7 +23,6 @@ let gameState = {
     currentTurn: "team1",
     gameStarted: false,
     matchLocked: false, 
-    secretRefToken: "eric_ref_2024",
     youtubeLink: "https://www.youtube.com",
     qrCodes: ["", "", "", "", "", ""],
     team1Formation: "4-4-2",
@@ -37,7 +35,7 @@ io.on('connection', (socket) => {
     socket.emit('gameStateUpdate', gameState);
 
     socket.on('claimReferee', (token) => {
-        if (token === gameState.secretRefToken) {
+        if (token === gameState.secretRefToken || token === "eric_ref_2024") {
             gameState.refereeId = socket.id;
             io.emit('gameStateUpdate', gameState);
             socket.emit('refConfirm', true);
@@ -49,31 +47,20 @@ io.on('connection', (socket) => {
         const txId = data.ticketCode.trim();
         if (!txId || !name) return;
 
-        // Block ONLY if this specific ID is already ACTIVE in the lobby right now
         const isCurrentlyActive = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
-        if (isCurrentlyActive) {
-            return socket.emit('error', 'This TDX-ID is already active in the arena.');
-        }
+        if (isCurrentlyActive) return socket.emit('error', 'This ID is already active.');
 
         try {
-            // Using the new URL provided by user
             const verificationUrl = `${SENTINEL_URL}?code=${txId}&name=${encodeURIComponent(name)}`;
             const response = await axios.get(verificationUrl, { maxRedirects: 5 });
             
             if (response.data && response.data.valid) {
                 const existing = gameState.allViewers.find(v => v.txId === txId);
-                if (existing) { 
-                    existing.id = socket.id; 
-                } else { 
-                    gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); 
-                }
+                if (existing) { existing.id = socket.id; } 
+                else { gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); }
                 io.emit('gameStateUpdate', gameState);
-            } else { 
-                socket.emit('error', response.data.message || 'Payment not verified.'); 
-            }
-        } catch (e) { 
-            socket.emit('error', 'Sentinel Connection Error'); 
-        }
+            } else { socket.emit('error', 'Payment not verified.'); }
+        } catch (e) { socket.emit('error', 'Sentinel Error'); }
     });
 
     socket.on('refUpdateYoutube', (link) => {
@@ -155,6 +142,15 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('playerSetFormation', (formation) => {
+        if (gameState.matchLocked) return;
+        const user = gameState.allViewers.find(v => v.id === socket.id);
+        if (!user || !user.role.startsWith('team')) return;
+        gameState[`${user.role}Formation`] = formation;
+        gameState[`${user.role}Tactics`] = {}; 
+        io.emit('gameStateUpdate', gameState);
+    });
+
     socket.on('refReset', () => {
         if (socket.id !== gameState.refereeId) return;
         gameState.gameStarted = false;
@@ -163,20 +159,16 @@ io.on('connection', (socket) => {
         gameState.team2Picks = [];
         gameState.team1Tactics = {};
         gameState.team2Tactics = {};
-        gameState.currentTurn = "team1";
         gameState.team1Player = null;
         gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
-        io.emit('softResetUI'); 
     });
 
     socket.on('refClearArena', () => {
         if (socket.id !== gameState.refereeId) return;
         gameState.allViewers = [];
         gameState.gameStarted = false;
-        gameState.qrCodes = ["", "", "", "", "", ""];
-        gameState.youtubeLink = "https://www.youtube.com";
         io.emit('clearArenaForce');
         io.emit('gameStateUpdate', gameState);
     });
