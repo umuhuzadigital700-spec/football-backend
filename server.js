@@ -43,18 +43,34 @@ io.on('connection', (socket) => {
 
     socket.on('joinWaitingRoom', async (data) => {
         const name = data.name.trim();
-        const txId = data.ticketCode ? data.ticketCode.trim() : "";
+        const txId = data.ticketCode.trim();
         if (!txId || !name) return;
+
+        // Requirement 1: Block ONLY if this specific ID is already ACTIVE in the lobby
+        const isCurrentlyActive = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
+        if (isCurrentlyActive) {
+            return socket.emit('error', 'This TDX-ID is currently active in the arena.');
+        }
+
         try {
             const sentinelUrl = `https://script.google.com/macros/s/AKfycbzvG5wJmLfTAjKwIzSINNWQwWkEM3urFYdyWXuM2zhmHcMYKOh5tQCyvdtsv0xptkeX/exec?code=${txId}&name=${encodeURIComponent(name)}`;
-            const response = await axios.get(sentinelUrl);
-            if (response.data.valid) {
+            const response = await axios.get(sentinelUrl, { maxRedirects: 5 });
+            
+            if (response.data && response.data.valid) {
+                // If user disconnected and came back, update their socket ID
                 const existing = gameState.allViewers.find(v => v.txId === txId);
-                if (existing) { existing.id = socket.id; existing.name = name; } 
-                else { gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); }
+                if (existing) { 
+                    existing.id = socket.id; 
+                } else { 
+                    gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); 
+                }
                 io.emit('gameStateUpdate', gameState);
-            } else { socket.emit('error', 'Payment not verified.'); }
-        } catch (e) { socket.emit('error', 'System Busy'); }
+            } else { 
+                socket.emit('error', 'Payment not verified.'); 
+            }
+        } catch (e) { 
+            socket.emit('error', 'System Busy'); 
+        }
     });
 
     socket.on('refUpdateYoutube', (link) => {
@@ -93,7 +109,7 @@ io.on('connection', (socket) => {
             gameState.team2Tactics = {};
             gameState.currentTurn = "team1";
             io.emit('gameStateUpdate', gameState);
-        } catch (e) { console.log("Draft Error"); }
+        } catch (e) { console.log("Sheet Error"); }
     });
 
     socket.on('refLockMatch', () => {
@@ -127,7 +143,8 @@ io.on('connection', (socket) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
         if (!user || !user.role.startsWith('team')) return;
         const tactics = gameState[`${user.role}Tactics`];
-        const card = gameState[`${user.role}Picks`].find(p => p.id === data.cardId);
+        const picks = gameState[`${user.role}Picks`];
+        const card = picks.find(p => p.id === data.cardId);
         if (card) {
             Object.keys(tactics).forEach(k => { if (tactics[k].id === data.cardId) delete tactics[k]; });
             tactics[data.slotIndex] = card;
@@ -152,11 +169,12 @@ io.on('connection', (socket) => {
         gameState.team2Picks = [];
         gameState.team1Tactics = {};
         gameState.team2Tactics = {};
+        gameState.currentTurn = "team1";
         gameState.team1Player = null;
         gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
-        io.emit('forceResetUI');
+        io.emit('softReset'); 
     });
 
     socket.on('refClearArena', () => {
