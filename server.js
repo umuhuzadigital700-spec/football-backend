@@ -46,11 +46,8 @@ io.on('connection', (socket) => {
         const name = data.name.trim();
         const txId = data.ticketCode.trim();
         if (!txId || !name) return;
-        
-        // UNLIMITED LOGIC: Block only if ID is currently in the lobby
         const active = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
-        if (active) return socket.emit('error', 'This ID is already active in the arena.');
-
+        if (active) return socket.emit('error', 'This ID is already active.');
         try {
             const verificationUrl = `${SENTINEL_URL}?code=${txId}&name=${encodeURIComponent(name)}`;
             const response = await axios.get(verificationUrl, { maxRedirects: 5 });
@@ -60,7 +57,7 @@ io.on('connection', (socket) => {
                 else { gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); }
                 io.emit('gameStateUpdate', gameState);
             } else { socket.emit('error', 'Payment not verified.'); }
-        } catch (e) { socket.emit('error', 'Sentinel Connection Error'); }
+        } catch (e) { socket.emit('error', 'Sentinel Error'); }
     });
 
     socket.on('refStartDraft', async () => {
@@ -76,8 +73,8 @@ io.on('connection', (socket) => {
             gameState.team2Tactics = {};
             gameState.currentTurn = "team1";
             io.emit('gameStateUpdate', gameState);
-            io.emit('syncArenaPhase', 'DRAFT');
-        } catch (e) { console.log("Draft Error"); }
+            io.emit('gameSyncPhase', 'DRAFT');
+        } catch (e) { console.log("Draft Start Error"); }
     });
 
     socket.on('refReset', () => {
@@ -92,14 +89,46 @@ io.on('connection', (socket) => {
         gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
-        io.emit('syncArenaPhase', 'LOBBY');
+        io.emit('gameSyncPhase', 'LOBBY');
     });
 
     socket.on('refClearArena', () => {
         if (socket.id !== gameState.refereeId) return;
         gameState.allViewers = [];
         gameState.gameStarted = false;
+        // THE REINFORCED WIPE: QR codes and Youtube are cleared completely
+        gameState.qrCodes = ["", "", "", "", "", ""];
+        gameState.youtubeLink = "https://www.youtube.com";
         io.emit('clearArenaForce');
+        io.emit('gameStateUpdate', gameState);
+    });
+
+    socket.on('refUpdateYoutube', (link) => {
+        if (socket.id !== gameState.refereeId) return;
+        gameState.youtubeLink = link;
+        io.emit('gameStateUpdate', gameState);
+    });
+
+    socket.on('refUpdateQRs', (qrs) => {
+        if (socket.id !== gameState.refereeId) return;
+        gameState.qrCodes = qrs;
+        io.emit('gameStateUpdate', gameState);
+    });
+
+    socket.on('refAssignRole', (data) => {
+        if (socket.id !== gameState.refereeId) return;
+        const user = gameState.allViewers.find(v => v.id === data.userId);
+        if (user) {
+            user.role = data.role;
+            if (data.role === 'team1') gameState.team1Player = { id: user.id, name: user.name };
+            if (data.role === 'team2') gameState.team2Player = { id: user.id, name: user.name };
+            io.emit('gameStateUpdate', gameState);
+        }
+    });
+
+    socket.on('refLockMatch', () => {
+        if (socket.id !== gameState.refereeId) return;
+        gameState.matchLocked = true;
         io.emit('gameStateUpdate', gameState);
     });
 
@@ -143,35 +172,6 @@ io.on('connection', (socket) => {
         if (!user || !user.role.startsWith('team')) return;
         gameState[`${user.role}Formation`] = formation;
         gameState[`${user.role}Tactics`] = {}; 
-        io.emit('gameStateUpdate', gameState);
-    });
-
-    socket.on('refUpdateYoutube', (link) => {
-        if (socket.id !== gameState.refereeId) return;
-        gameState.youtubeLink = link;
-        io.emit('gameStateUpdate', gameState);
-    });
-
-    socket.on('refUpdateQRs', (qrs) => {
-        if (socket.id !== gameState.refereeId) return;
-        gameState.qrCodes = qrs;
-        io.emit('gameStateUpdate', gameState);
-    });
-
-    socket.on('refAssignRole', (data) => {
-        if (socket.id !== gameState.refereeId) return;
-        const user = gameState.allViewers.find(v => v.id === data.userId);
-        if (user) {
-            user.role = data.role;
-            if (data.role === 'team1') gameState.team1Player = { id: user.id, name: user.name };
-            if (data.role === 'team2') gameState.team2Player = { id: user.id, name: user.name };
-            io.emit('gameStateUpdate', gameState);
-        }
-    });
-
-    socket.on('refLockMatch', () => {
-        if (socket.id !== gameState.refereeId) return;
-        gameState.matchLocked = true;
         io.emit('gameStateUpdate', gameState);
     });
 });
