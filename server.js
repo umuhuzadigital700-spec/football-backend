@@ -10,6 +10,9 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
+// YOUR UPDATED GOOGLE SENTINEL URL
+const SENTINEL_URL = "https://script.google.com/macros/s/AKfycbzW_qRQsGYZQtyd_4eB27JXHYCJF__Ck33ki7P7xWqtZs84vye9uGIcNf_P31jFqrM3/exec";
+
 let gameState = {
     refereeId: null,
     allViewers: [],      
@@ -46,18 +49,18 @@ io.on('connection', (socket) => {
         const txId = data.ticketCode.trim();
         if (!txId || !name) return;
 
-        // Requirement 1: Block ONLY if this specific ID is already ACTIVE in the lobby
+        // Block ONLY if this specific ID is already ACTIVE in the lobby right now
         const isCurrentlyActive = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
         if (isCurrentlyActive) {
-            return socket.emit('error', 'This TDX-ID is currently active in the arena.');
+            return socket.emit('error', 'This TDX-ID is already active in the arena.');
         }
 
         try {
-            const sentinelUrl = `https://script.google.com/macros/s/AKfycbzvG5wJmLfTAjKwIzSINNWQwWkEM3urFYdyWXuM2zhmHcMYKOh5tQCyvdtsv0xptkeX/exec?code=${txId}&name=${encodeURIComponent(name)}`;
-            const response = await axios.get(sentinelUrl, { maxRedirects: 5 });
+            // Using the new URL provided by user
+            const verificationUrl = `${SENTINEL_URL}?code=${txId}&name=${encodeURIComponent(name)}`;
+            const response = await axios.get(verificationUrl, { maxRedirects: 5 });
             
             if (response.data && response.data.valid) {
-                // If user disconnected and came back, update their socket ID
                 const existing = gameState.allViewers.find(v => v.txId === txId);
                 if (existing) { 
                     existing.id = socket.id; 
@@ -66,10 +69,10 @@ io.on('connection', (socket) => {
                 }
                 io.emit('gameStateUpdate', gameState);
             } else { 
-                socket.emit('error', 'Payment not verified.'); 
+                socket.emit('error', response.data.message || 'Payment not verified.'); 
             }
         } catch (e) { 
-            socket.emit('error', 'System Busy'); 
+            socket.emit('error', 'Sentinel Connection Error'); 
         }
     });
 
@@ -109,7 +112,7 @@ io.on('connection', (socket) => {
             gameState.team2Tactics = {};
             gameState.currentTurn = "team1";
             io.emit('gameStateUpdate', gameState);
-        } catch (e) { console.log("Sheet Error"); }
+        } catch (e) { console.log("Draft Error"); }
     });
 
     socket.on('refLockMatch', () => {
@@ -152,15 +155,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('playerSetFormation', (formation) => {
-        if (gameState.matchLocked) return;
-        const user = gameState.allViewers.find(v => v.id === socket.id);
-        if (!user || !user.role.startsWith('team')) return;
-        gameState[`${user.role}Formation`] = formation;
-        gameState[`${user.role}Tactics`] = {};
-        io.emit('gameStateUpdate', gameState);
-    });
-
     socket.on('refReset', () => {
         if (socket.id !== gameState.refereeId) return;
         gameState.gameStarted = false;
@@ -174,7 +168,7 @@ io.on('connection', (socket) => {
         gameState.team2Player = null;
         gameState.allViewers.forEach(v => v.role = 'spectator');
         io.emit('gameStateUpdate', gameState);
-        io.emit('softReset'); 
+        io.emit('softResetUI'); 
     });
 
     socket.on('refClearArena', () => {
