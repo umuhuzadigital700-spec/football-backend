@@ -169,8 +169,9 @@ io.on('connection', (socket) => {
         const user = gameState.allViewers.find(v => v.id === data.userId);
         if (user) {
             user.role = data.role;
-            if (data.role === 'team1') gameState.team1Player = { id: user.id, name: user.name };
-            if (data.role === 'team2') gameState.team2Player = { id: user.id, name: user.name };
+            // Now we store the txId too so we can "find" them later
+            if (data.role === 'team1') gameState.team1Player = { id: user.id, name: user.name, txId: user.txId };
+            if (data.role === 'team2') gameState.team2Player = { id: user.id, name: user.name, txId: user.txId };
             io.emit('gameStateUpdate', gameState);
         }
     });
