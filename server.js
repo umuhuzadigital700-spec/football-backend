@@ -65,25 +65,35 @@ io.on('connection', (socket) => {
         const name = data.name.trim();
         const txId = data.ticketCode.trim();
         if (!txId || !name) return;
-        const active = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
-        if (active) return socket.emit('error', 'This ID is already active.');
+
         try {
             const verificationUrl = `${SENTINEL_URL}?code=${txId}&name=${encodeURIComponent(name)}`;
             const response = await axios.get(verificationUrl, { maxRedirects: 5 });
+            
             if (response.data && response.data.valid) {
                 const amount = response.data.amount || 0;
                 let secureLink = (amount >= 2000) ? await getSecureStream() : null;
                 
-                const existing = gameState.allViewers.find(v => v.txId === txId);
-                if (existing) { 
-                    existing.id = socket.id; 
-                    existing.secureLink = secureLink;
-                } else { 
+                // --- THE FIX: SYNC OLD ROLE TO NEW SOCKET ID ---
+                const existingIndex = gameState.allViewers.findIndex(v => v.txId === txId);
+                
+                if (existingIndex !== -1) {
+                    // This user was already here! Update their ID and keep their Role.
+                    gameState.allViewers[existingIndex].id = socket.id;
+                    gameState.allViewers[existingIndex].secureLink = secureLink;
+                    
+                    // Update Team Player IDs if they were T1 or T2
+                    if (gameState.team1Player && gameState.team1Player.txId === txId) gameState.team1Player.id = socket.id;
+                    if (gameState.team2Player && gameState.team2Player.txId === txId) gameState.team2Player.id = socket.id;
+                    
+                } else {
+                    // Totally new user
                     gameState.allViewers.push({ 
                         id: socket.id, name: name, role: 'spectator', txId: txId, 
                         isPremium: amount >= 2000, secureLink: secureLink 
-                    }); 
+                    });
                 }
+                
                 io.emit('gameStateUpdate', gameState);
             } else { socket.emit('error', 'Payment not verified.'); }
         } catch (e) { socket.emit('error', 'Sentinel Error'); }
