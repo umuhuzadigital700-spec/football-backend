@@ -10,7 +10,15 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-const SENTINEL_URL = "https://script.google.com/macros/s/AKfycbzW_qRQsGYZQtyd_4eB27JXHYCJF__Ck33ki7P7xWqtZs84vye9uGIcNf_P31jFqrM3/exec";
+// --- UPDATED SENTINEL URL (Your new Deployment ID) ---
+const SENTINEL_URL = "https://script.google.com/macros/s/AKfycby_FXyDMq0K0dW2kpRuaW0NdSTEy-9X8JrHIttJdjpadXs0cKV9Lr9Hg2EKY9pJhGdU/exec";
+
+// --- CLOUDFLARE CONFIG ---
+const CF_CONFIG = {
+    accId: process.env.CLOUDFLARE_ACCOUNT_ID,
+    token: process.env.CLOUDFLARE_API_TOKEN,
+    uid: process.env.CLOUDFLARE_VIDEO_ID
+};
 
 let gameState = {
     refereeId: null,
@@ -24,12 +32,23 @@ let gameState = {
     gameStarted: false,
     matchLocked: false, 
     youtubeLink: "https://www.youtube.com",
+    arenaBanner: "", 
     qrCodes: ["", "", "", "", "", ""],
     team1Formation: "4-4-2",
     team2Formation: "4-4-2",
     team1Tactics: {}, 
     team2Tactics: {}
 };
+
+// Helper: Generate Secure Link for 2000+ RWF users
+async function getSecureStream() {
+    if (!CF_CONFIG.token || !CF_CONFIG.accId) return null;
+    try {
+        const url = `https://api.cloudflare.com/client/v4/accounts/${CF_CONFIG.accId}/stream/live_inputs/${CF_CONFIG.uid}/token`;
+        const res = await axios.post(url, {}, { headers: { 'Authorization': `Bearer ${CF_CONFIG.token}` } });
+        return `https://customer-v7ps8f9e01.cloudflarestream.com/${res.data.result.token}/iframe`;
+    } catch (e) { return null; }
+}
 
 io.on('connection', (socket) => {
     socket.emit('gameStateUpdate', gameState);
@@ -52,12 +71,33 @@ io.on('connection', (socket) => {
             const verificationUrl = `${SENTINEL_URL}?code=${txId}&name=${encodeURIComponent(name)}`;
             const response = await axios.get(verificationUrl, { maxRedirects: 5 });
             if (response.data && response.data.valid) {
+                const amount = response.data.amount || 0;
+                let secureLink = (amount >= 2000) ? await getSecureStream() : null;
+                
                 const existing = gameState.allViewers.find(v => v.txId === txId);
-                if (existing) { existing.id = socket.id; } 
-                else { gameState.allViewers.push({ id: socket.id, name: name, role: 'spectator', txId: txId }); }
+                if (existing) { 
+                    existing.id = socket.id; 
+                    existing.secureLink = secureLink;
+                } else { 
+                    gameState.allViewers.push({ 
+                        id: socket.id, name: name, role: 'spectator', txId: txId, 
+                        isPremium: amount >= 2000, secureLink: secureLink 
+                    }); 
+                }
                 io.emit('gameStateUpdate', gameState);
             } else { socket.emit('error', 'Payment not verified.'); }
         } catch (e) { socket.emit('error', 'Sentinel Error'); }
+    });
+
+    socket.on('refForceApprove', (targetId) => {
+        if (socket.id !== gameState.refereeId) return;
+        io.to(targetId).emit('forceJoinSuccess');
+    });
+
+    socket.on('refUpdateBanner', (url) => {
+        if (socket.id !== gameState.refereeId) return;
+        gameState.arenaBanner = url;
+        io.emit('gameStateUpdate', gameState);
     });
 
     socket.on('refStartDraft', async () => {
@@ -96,23 +136,19 @@ io.on('connection', (socket) => {
         if (socket.id !== gameState.refereeId) return;
         gameState.allViewers = [];
         gameState.gameStarted = false;
-        // THE REINFORCED WIPE: QR codes and Youtube are cleared completely
         gameState.qrCodes = ["", "", "", "", "", ""];
         gameState.youtubeLink = "https://www.youtube.com";
+        gameState.arenaBanner = "";
         io.emit('clearArenaForce');
         io.emit('gameStateUpdate', gameState);
     });
 
     socket.on('refUpdateYoutube', (link) => {
-        if (socket.id !== gameState.refereeId) return;
-        gameState.youtubeLink = link;
-        io.emit('gameStateUpdate', gameState);
+        if (socket.id === gameState.refereeId) { gameState.youtubeLink = link; io.emit('gameStateUpdate', gameState); }
     });
 
     socket.on('refUpdateQRs', (qrs) => {
-        if (socket.id !== gameState.refereeId) return;
-        gameState.qrCodes = qrs;
-        io.emit('gameStateUpdate', gameState);
+        if (socket.id === gameState.refereeId) { gameState.qrCodes = qrs; io.emit('gameStateUpdate', gameState); }
     });
 
     socket.on('refAssignRole', (data) => {
@@ -127,9 +163,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('refLockMatch', () => {
-        if (socket.id !== gameState.refereeId) return;
-        gameState.matchLocked = true;
-        io.emit('gameStateUpdate', gameState);
+        if (socket.id === gameState.refereeId) { gameState.matchLocked = true; io.emit('gameStateUpdate', gameState); }
     });
 
     socket.on('playerPickCard', (cardId) => {
@@ -177,4 +211,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+server.listen(PORT, () => { console.log(`Arena Backend Running`); });
