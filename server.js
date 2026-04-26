@@ -10,10 +10,10 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// --- UPDATED SENTINEL URL (Your new Deployment ID) ---
+// --- CONNECTED TO YOUR NEW DEPLOYMENT ---
 const SENTINEL_URL = "https://script.google.com/macros/s/AKfycby_FXyDMq0K0dW2kpRuaW0NdSTEy-9X8JrHIttJdjpadXs0cKV9Lr9Hg2EKY9pJhGdU/exec";
 
-// --- CLOUDFLARE CONFIG ---
+// --- CLOUDFLARE CONFIG (From Vercel Variables) ---
 const CF_CONFIG = {
     accId: process.env.CLOUDFLARE_ACCOUNT_ID,
     token: process.env.CLOUDFLARE_API_TOKEN,
@@ -32,7 +32,7 @@ let gameState = {
     gameStarted: false,
     matchLocked: false, 
     youtubeLink: "https://www.youtube.com",
-    arenaBanner: "", 
+    arenaBanner: "", // Added for your Landscape Photo
     qrCodes: ["", "", "", "", "", ""],
     team1Formation: "4-4-2",
     team2Formation: "4-4-2",
@@ -40,7 +40,7 @@ let gameState = {
     team2Tactics: {}
 };
 
-// Helper: Generate Secure Link for 2000+ RWF users
+// Helper: Generate Secure Link for 2000 RWF users
 async function getSecureStream() {
     if (!CF_CONFIG.token || !CF_CONFIG.accId) return null;
     try {
@@ -89,17 +89,20 @@ io.on('connection', (socket) => {
         } catch (e) { socket.emit('error', 'Sentinel Error'); }
     });
 
+    // Manual Verify Button Logic
     socket.on('refForceApprove', (targetId) => {
         if (socket.id !== gameState.refereeId) return;
         io.to(targetId).emit('forceJoinSuccess');
     });
 
+    // Landscape Photo Logic
     socket.on('refUpdateBanner', (url) => {
         if (socket.id !== gameState.refereeId) return;
         gameState.arenaBanner = url;
         io.emit('gameStateUpdate', gameState);
     });
 
+    // --- ALL ORIGINAL DRAFT/PICK/TACTIC LOGIC BELOW ---
     socket.on('refStartDraft', async () => {
         if (socket.id !== gameState.refereeId) return;
         try {
@@ -211,4 +214,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => { console.log(`Arena Backend Running`); });
+server.listen(PORT, () => { console.log(`Arena Backend Online`); });
