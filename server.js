@@ -59,8 +59,8 @@ io.on('connection', (socket) => {
     });
 
     socket.on('joinWaitingRoom', async (data) => {
-        const name = data.name.trim();
-        const txId = data.ticketCode.trim();
+        const name = data.name?.trim();
+        const txId = data.ticketCode?.trim();
         if (!txId || !name) return;
 
         try {
@@ -71,13 +71,12 @@ io.on('connection', (socket) => {
                 const amount = Number(response.data.amount) || 0;
                 let secureLink = (amount >= 2000) ? await getSecureStream() : null;
                 
-                // SYNC LOGIC: Match new socket to existing TxID session
                 let userIdx = gameState.allViewers.findIndex(v => v.txId === txId);
                 
                 if (userIdx !== -1) {
                     gameState.allViewers[userIdx].id = socket.id;
                     gameState.allViewers[userIdx].secureLink = secureLink;
-                    
+                    gameState.allViewers[userIdx].isPremium = amount >= 2000;
                     if (gameState.team1Player && gameState.team1Player.txId === txId) gameState.team1Player.id = socket.id;
                     if (gameState.team2Player && gameState.team2Player.txId === txId) gameState.team2Player.id = socket.id;
                 } else {
