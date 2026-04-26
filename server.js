@@ -10,8 +10,10 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
+// --- CONNECTED TO YOUR DEPLOYMENT ---
 const SENTINEL_URL = "https://script.google.com/macros/s/AKfycby_FXyDMq0K0dW2kpRuaW0NdSTEy-9X8JrHIttJdjpadXs0cKV9Lr9Hg2EKY9pJhGdU/exec";
 
+// --- CLOUDFLARE CONFIG (Needs Environment Variables) ---
 const CF_CONFIG = {
     accId: process.env.CLOUDFLARE_ACCOUNT_ID,
     token: process.env.CLOUDFLARE_API_TOKEN,
@@ -30,7 +32,7 @@ let gameState = {
     gameStarted: false,
     matchLocked: false, 
     youtubeLink: "https://www.youtube.com",
-    arenaBanner: "", 
+    arenaBanner: "", // For the landscape photo
     qrCodes: ["", "", "", "", "", ""],
     team1Formation: "4-4-2",
     team2Formation: "4-4-2",
@@ -71,12 +73,14 @@ io.on('connection', (socket) => {
                 const amount = Number(response.data.amount) || 0;
                 let secureLink = (amount >= 2000) ? await getSecureStream() : null;
                 
+                // --- SYNC / FREEZE FIX ---
                 let userIdx = gameState.allViewers.findIndex(v => v.txId === txId);
                 
                 if (userIdx !== -1) {
                     gameState.allViewers[userIdx].id = socket.id;
                     gameState.allViewers[userIdx].secureLink = secureLink;
                     gameState.allViewers[userIdx].isPremium = amount >= 2000;
+                    // Update active team objects if they were already assigned
                     if (gameState.team1Player && gameState.team1Player.txId === txId) gameState.team1Player.id = socket.id;
                     if (gameState.team2Player && gameState.team2Player.txId === txId) gameState.team2Player.id = socket.id;
                 } else {
@@ -90,15 +94,19 @@ io.on('connection', (socket) => {
         } catch (e) { socket.emit('error', 'Sentinel Error'); }
     });
 
-    socket.on('refForceApprove', (targetId) => {
-        if (socket.id !== gameState.refereeId) return;
-        io.to(targetId).emit('forceJoinSuccess');
+    socket.on('refUpdateBanner', (url) => {
+        if (socket.id === gameState.refereeId) { gameState.arenaBanner = url; io.emit('gameStateUpdate', gameState); }
     });
 
-    socket.on('refUpdateBanner', (url) => {
+    socket.on('refAssignRole', (data) => {
         if (socket.id !== gameState.refereeId) return;
-        gameState.arenaBanner = url;
-        io.emit('gameStateUpdate', gameState);
+        const user = gameState.allViewers.find(v => v.id === data.userId);
+        if (user) {
+            user.role = data.role;
+            if (data.role === 'team1') gameState.team1Player = { id: user.id, name: user.name, txId: user.txId };
+            if (data.role === 'team2') gameState.team2Player = { id: user.id, name: user.name, txId: user.txId };
+            io.emit('gameStateUpdate', gameState);
+        }
     });
 
     socket.on('refStartDraft', async () => {
@@ -115,7 +123,7 @@ io.on('connection', (socket) => {
             gameState.currentTurn = "team1";
             io.emit('gameStateUpdate', gameState);
             io.emit('gameSyncPhase', 'DRAFT');
-        } catch (e) { console.log("Draft Start Error"); }
+        } catch (e) { console.log("Draft Error"); }
     });
 
     socket.on('refReset', () => {
@@ -144,28 +152,9 @@ io.on('connection', (socket) => {
         io.emit('gameStateUpdate', gameState);
     });
 
-    socket.on('refUpdateYoutube', (link) => {
-        if (socket.id === gameState.refereeId) { gameState.youtubeLink = link; io.emit('gameStateUpdate', gameState); }
-    });
-
-    socket.on('refUpdateQRs', (qrs) => {
-        if (socket.id === gameState.refereeId) { gameState.qrCodes = qrs; io.emit('gameStateUpdate', gameState); }
-    });
-
-    socket.on('refAssignRole', (data) => {
-        if (socket.id !== gameState.refereeId) return;
-        const user = gameState.allViewers.find(v => v.id === data.userId);
-        if (user) {
-            user.role = data.role;
-            if (data.role === 'team1') gameState.team1Player = { id: user.id, name: user.name, txId: user.txId };
-            if (data.role === 'team2') gameState.team2Player = { id: user.id, name: user.name, txId: user.txId };
-            io.emit('gameStateUpdate', gameState);
-        }
-    });
-
-    socket.on('refLockMatch', () => {
-        if (socket.id === gameState.refereeId) { gameState.matchLocked = true; io.emit('gameStateUpdate', gameState); }
-    });
+    socket.on('refUpdateYoutube', (link) => { if (socket.id === gameState.refereeId) { gameState.youtubeLink = link; io.emit('gameStateUpdate', gameState); } });
+    socket.on('refUpdateQRs', (qrs) => { if (socket.id === gameState.refereeId) { gameState.qrCodes = qrs; io.emit('gameStateUpdate', gameState); } });
+    socket.on('refLockMatch', () => { if (socket.id === gameState.refereeId) { gameState.matchLocked = true; io.emit('gameStateUpdate', gameState); } });
 
     socket.on('playerPickCard', (cardId) => {
         const user = gameState.allViewers.find(v => v.id === socket.id);
@@ -178,11 +167,8 @@ io.on('connection', (socket) => {
             gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId);
             const otherTeam = user.role === 'team1' ? 'team2' : 'team1';
             const otherPicks = user.role === 'team1' ? gameState.team2Picks : gameState.team1Picks;
-            if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) {
-                gameState.currentTurn = "FINISHED";
-            } else {
-                gameState.currentTurn = (otherPicks.length < 11) ? otherTeam : user.role;
-            }
+            if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) { gameState.currentTurn = "FINISHED"; } 
+            else { gameState.currentTurn = (otherPicks.length < 11) ? otherTeam : user.role; }
             io.emit('gameStateUpdate', gameState);
         }
     });
@@ -212,4 +198,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => { console.log(`Arena Backend Online`); });
+server.listen(PORT, () => { console.log(`Arena Backend Ready`); });
