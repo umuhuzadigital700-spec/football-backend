@@ -63,10 +63,15 @@ io.on('connection', (socket) => {
         const txId = data.ticketCode?.trim();
         if (!txId || !name) return;
 
+        // DEVICE LOCK CHECK: Reject if TxID is already active on a DIFFERENT socket
+        const alreadyActive = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
+        if (alreadyActive) return socket.emit('error', 'Iyi code iri gukoreshwa n’undi muntu. (Code in use)');
+
         try {
             const verificationUrl = `${SENTINEL_URL}?code=${txId}&name=${encodeURIComponent(name)}`;
             const response = await axios.get(verificationUrl, { maxRedirects: 5 });
             
+            // SECURITY: Only allow if Sentinel returns VALID from Sheets
             if (response.data && response.data.valid) {
                 const amount = Number(response.data.amount) || 0;
                 let secureLink = (amount >= 2000) ? await getSecureStream() : null;
@@ -86,7 +91,9 @@ io.on('connection', (socket) => {
                     });
                 }
                 io.emit('gameStateUpdate', gameState);
-            } else { socket.emit('error', 'Payment not verified.'); }
+            } else { 
+                socket.emit('error', 'Iyi code ntizwi cyangwa ntiyishyuwe. (Invalid Code)'); 
+            }
         } catch (e) { socket.emit('error', 'Sentinel Error'); }
     });
 
@@ -144,7 +151,7 @@ io.on('connection', (socket) => {
         gameState.qrCodes = ["", "", "", "", "", ""];
         gameState.youtubeLink = "https://www.youtube.com";
         gameState.arenaBanner = "";
-        io.emit('clearArenaForce'); // THIS TELLS PHONES TO WIPE MEMORY
+        io.emit('clearArenaForce'); 
         io.emit('gameStateUpdate', gameState);
     });
 
@@ -194,4 +201,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => { console.log(`Arena Backend ONLINE`); });
+server.listen(PORT, () => { console.log(`Arena Backend Masterpiece Online`); });
