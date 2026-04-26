@@ -10,10 +10,8 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// --- CONNECTED TO YOUR NEW DEPLOYMENT ---
 const SENTINEL_URL = "https://script.google.com/macros/s/AKfycby_FXyDMq0K0dW2kpRuaW0NdSTEy-9X8JrHIttJdjpadXs0cKV9Lr9Hg2EKY9pJhGdU/exec";
 
-// --- CLOUDFLARE CONFIG (From Vercel Variables) ---
 const CF_CONFIG = {
     accId: process.env.CLOUDFLARE_ACCOUNT_ID,
     token: process.env.CLOUDFLARE_API_TOKEN,
@@ -32,7 +30,7 @@ let gameState = {
     gameStarted: false,
     matchLocked: false, 
     youtubeLink: "https://www.youtube.com",
-    arenaBanner: "", // Added for your Landscape Photo
+    arenaBanner: "", 
     qrCodes: ["", "", "", "", "", ""],
     team1Formation: "4-4-2",
     team2Formation: "4-4-2",
@@ -40,7 +38,6 @@ let gameState = {
     team2Tactics: {}
 };
 
-// Helper: Generate Secure Link for 2000 RWF users
 async function getSecureStream() {
     if (!CF_CONFIG.token || !CF_CONFIG.accId) return null;
     try {
@@ -71,48 +68,40 @@ io.on('connection', (socket) => {
             const response = await axios.get(verificationUrl, { maxRedirects: 5 });
             
             if (response.data && response.data.valid) {
-                const amount = response.data.amount || 0;
+                const amount = Number(response.data.amount) || 0;
                 let secureLink = (amount >= 2000) ? await getSecureStream() : null;
                 
-                // --- THE FIX: SYNC OLD ROLE TO NEW SOCKET ID ---
-                const existingIndex = gameState.allViewers.findIndex(v => v.txId === txId);
+                // SYNC LOGIC: Match new socket to existing TxID session
+                let userIdx = gameState.allViewers.findIndex(v => v.txId === txId);
                 
-                if (existingIndex !== -1) {
-                    // This user was already here! Update their ID and keep their Role.
-                    gameState.allViewers[existingIndex].id = socket.id;
-                    gameState.allViewers[existingIndex].secureLink = secureLink;
+                if (userIdx !== -1) {
+                    gameState.allViewers[userIdx].id = socket.id;
+                    gameState.allViewers[userIdx].secureLink = secureLink;
                     
-                    // Update Team Player IDs if they were T1 or T2
                     if (gameState.team1Player && gameState.team1Player.txId === txId) gameState.team1Player.id = socket.id;
                     if (gameState.team2Player && gameState.team2Player.txId === txId) gameState.team2Player.id = socket.id;
-                    
                 } else {
-                    // Totally new user
                     gameState.allViewers.push({ 
                         id: socket.id, name: name, role: 'spectator', txId: txId, 
                         isPremium: amount >= 2000, secureLink: secureLink 
                     });
                 }
-                
                 io.emit('gameStateUpdate', gameState);
             } else { socket.emit('error', 'Payment not verified.'); }
         } catch (e) { socket.emit('error', 'Sentinel Error'); }
     });
 
-    // Manual Verify Button Logic
     socket.on('refForceApprove', (targetId) => {
         if (socket.id !== gameState.refereeId) return;
         io.to(targetId).emit('forceJoinSuccess');
     });
 
-    // Landscape Photo Logic
     socket.on('refUpdateBanner', (url) => {
         if (socket.id !== gameState.refereeId) return;
         gameState.arenaBanner = url;
         io.emit('gameStateUpdate', gameState);
     });
 
-    // --- ALL ORIGINAL DRAFT/PICK/TACTIC LOGIC BELOW ---
     socket.on('refStartDraft', async () => {
         if (socket.id !== gameState.refereeId) return;
         try {
@@ -169,7 +158,6 @@ io.on('connection', (socket) => {
         const user = gameState.allViewers.find(v => v.id === data.userId);
         if (user) {
             user.role = data.role;
-            // Now we store the txId too so we can "find" them later
             if (data.role === 'team1') gameState.team1Player = { id: user.id, name: user.name, txId: user.txId };
             if (data.role === 'team2') gameState.team2Player = { id: user.id, name: user.name, txId: user.txId };
             io.emit('gameStateUpdate', gameState);
