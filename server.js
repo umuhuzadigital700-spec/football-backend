@@ -39,13 +39,25 @@ let gameState = {
 };
 
 async function getSecureStream() {
-    if (!CF_CONFIG.token || !CF_CONFIG.accId) return null;
+    if (!CF_CONFIG.token || !CF_CONFIG.accId || !CF_CONFIG.uid) return null;
     try {
-        const url = `https://api.cloudflare.com/client/v4/accounts/${CF_CONFIG.accId}/stream/live_inputs/${CF_CONFIG.uid}/token`;
-        const res = await axios.post(url, {}, { headers: { 'Authorization': `Bearer ${CF_CONFIG.token}` } });
-        // FIXED: Correct path to Cloudflare token
-        return `https://customer-v7ps8f9e01.cloudflarestream.com/${res.data.result.token}/iframe`;
-    } catch (e) { return null; }
+        // SURGICAL FIX: The correct API endpoint for generating a Signed Token
+        const url = `https://api.cloudflare.com/client/v4/accounts/${CF_CONFIG.accId}/stream/${CF_CONFIG.uid}/token`;
+        const res = await axios.post(url, {}, { 
+            headers: { 
+                'Authorization': `Bearer ${CF_CONFIG.token}`,
+                'Content-Type': 'application/json'
+            } 
+        });
+        
+        if (res.data && res.data.result && res.data.result.token) {
+            return `https://customer-v7ps8f9e01.cloudflarestream.com/${res.data.result.token}/iframe`;
+        }
+        return null;
+    } catch (e) { 
+        console.error("CF Handshake Failed:", e.message);
+        return null; 
+    }
 }
 
 io.on('connection', (socket) => {
@@ -64,7 +76,6 @@ io.on('connection', (socket) => {
         const txId = data.ticketCode?.trim();
         if (!txId || !name) return;
 
-        // 1. STRICT DEVICE LOCK: Block if TxID is used elsewhere
         const alreadyActive = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
         if (alreadyActive) return socket.emit('error', 'Iyi code iri gukoreshwa n’undi muntu.');
 
@@ -72,7 +83,6 @@ io.on('connection', (socket) => {
             const verificationUrl = `${SENTINEL_URL}?code=${txId}&name=${encodeURIComponent(name)}`;
             const response = await axios.get(verificationUrl, { maxRedirects: 5 });
             
-            // 2. VALIDATION CHECK: Only allow if registered in Sheets
             if (response.data && response.data.valid) {
                 const amount = Number(response.data.amount) || 0;
                 let secureLink = (amount >= 2000) ? await getSecureStream() : null;
@@ -98,7 +108,7 @@ io.on('connection', (socket) => {
         } catch (e) { socket.emit('error', 'Sentinel Error'); }
     });
 
-    // --- REMAINDER OF YOUR CODE UNTOUCHED TO PRESERVE 100% WORKING FUNCTIONS ---
+    // --- EVERYTHING BELOW REMAINS 100% IDENTICAL TO YOUR WORKING VERSION ---
     socket.on('refUpdateBanner', (url) => { if (socket.id === gameState.refereeId) { gameState.arenaBanner = url; io.emit('gameStateUpdate', gameState); } });
     socket.on('refAssignRole', (data) => {
         if (socket.id !== gameState.refereeId) return;
