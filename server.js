@@ -201,6 +201,14 @@ io.on('connection', (socket) => {
         io.emit('gameStateUpdate', gameState);
     });
 });
+// ... (Your existing code above)
 
+// --- ADD THIS HERE ---
+app.get('/health', (req, res) => {
+    res.status(200).send('Arena is Awake');
+});
+
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => { console.log(`Arena Backend Masterpiece Online`); });
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => { console.log(`Arena Backend Masterpiece Online`); });
