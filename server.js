@@ -207,16 +207,13 @@ io.on('connection', (socket) => {
 app.get('/health', (req, res) => {
     res.status(200).send('Arena is Awake');
 });
-
 // This creates the "door" for the Google Script to knock on
 app.get('/health', (req, res) => {
     res.status(200).send('Arena is Awake');
 });
 
-// Leave the lines below as they are
+// Start the server
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => { console.log(`Arena Backend Masterpiece Online`); });
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => { console.log(`Arena Backend Masterpiece Online`); });
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => { console.log(`Arena Backend Masterpiece Online`); });
+server.listen(PORT, () => { 
+    console.log(`Arena Backend Masterpiece Online`); 
+});
