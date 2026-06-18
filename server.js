@@ -10,7 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, { cors: { origin: '*' } });
 
 // ── External Endpoints ────────────────────────────────────────────────────────
 const SENTINEL_URL = "https://script.google.com/macros/s/AKfycby_FXyDMq0K0dW2kpRuaW0NdSTEy-9X8JrHIttJdjpadXs0cKV9Lr9Hg2EKY9pJhGdU/exec";
@@ -24,8 +24,22 @@ const CF_CONFIG = {
   uid: process.env.CLOUDFLARE_VIDEO_ID
 };
 
-// ── Central Game State ────────────────────────────────────────────────────────
-let gameState = {
+// ════════════════════════════════════════════════════════════════════════════
+// STATE ARCHITECTURE: Two clearly separated buckets.
+//
+//  draftState  — highly volatile, rapidly mutating during picks/turns/resets.
+//                Wiped freely by refReset / refStartDraft.
+//
+//  votingState — persistent voting collection.
+//                NEVER touched by any draft operation.
+//
+// The single gameState object sent to clients is assembled by buildGameState()
+// which merges both buckets just before emission, keeping them insulated from
+// each other at the server level.
+// ════════════════════════════════════════════════════════════════════════════
+
+// Draft bucket — only draft-related, volatile fields live here.
+let draftState = {
   refereeId: null,
   allViewers: [],
   availableCards: [],
@@ -33,116 +47,130 @@ let gameState = {
   team2Picks: [],
   team1Player: null,
   team2Player: null,
-  currentTurn: "team1",
+  currentTurn: 'team1',
   gameStarted: false,
   matchLocked: false,
-  youtubeLink: "https://www.youtube.com",
-  arenaBanner: "",
-  qrCodes: ["", "", "", "", "", ""],
-  team1Formation: "4-4-2",
-  team2Formation: "4-4-2",
+  youtubeLink: 'https://www.youtube.com',
+  arenaBanner: '',
+  qrCodes: ['', '', '', '', '', ''],
+  team1Formation: '4-4-2',
+  team2Formation: '4-4-2',
   team1Tactics: {},
   team2Tactics: {},
-  
-  // ── VOTING ENGINE DATA ──
-  votingMatches: [] // Merged Type A (Live) + Type B (Spreadsheet CSV) [cite: 3]
 };
 
-//  ════════════════════════════════════════════════════════════════════════════
-//  VOTING ENGINE HELPERS
-//  ════════════════════════════════════════════════════════════════════════════
+// Voting bucket — persistent, append-only from the outside. Never cleared by draft ops.
+let votingState = {
+  votingMatches: [],
+};
 
-// Fetch manual Type B matches from your public CSV link [cite: 4]
+// Merges both buckets into one flat object for socket emission.
+function buildGameState() {
+  return { ...draftState, ...votingState };
+}
+
+// Emit a full merged state to all clients.
+function broadcastState() {
+  io.emit('gameStateUpdate', buildGameState());
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// VOTING ENGINE HELPERS
+// ════════════════════════════════════════════════════════════════════════════
+
 async function fetchTypeBMatches() {
   try {
-    const res = await axios.get(VOTING_CSV_URL, { timeout: 8000 }); [cite: 5]
-    const rows = await csv().fromString(res.data); [cite: 6]
+    const res = await axios.get(VOTING_CSV_URL, { timeout: 8000 });
+    const rows = await csv().fromString(res.data);
     return rows.map(row => ({
-      matchId: String(row["Match_ID"] || row["matchId"] || ""),
-      name: String(row["Match_Name"] || row["name"] || "Unnamed Match"),
-      matchType: "B",
-      status: String(row["Status"] || row["status"] || "CLOSED").toUpperCase(),
-      coach1: String(row["Coach_1"] || row["coach1"] || ""),
-      coach2: String(row["Coach_2"] || row["coach2"] || ""),
-      team1Players: String(row["Team_1_Players"] || row["team1Players"] || ""),
-      team2Players: String(row["Team_2_Players"] || row["team2Players"] || ""),
+      matchId: String(row['Match_ID'] || row['matchId'] || ''),
+      name: String(row['Match_Name'] || row['name'] || 'Unnamed Match'),
+      matchType: 'B',
+      status: String(row['Status'] || row['status'] || 'CLOSED').toUpperCase(),
+      coach1: String(row['Coach_1'] || row['coach1'] || ''),
+      coach2: String(row['Coach_2'] || row['coach2'] || ''),
+      team1Players: String(row['Team_1_Players'] || row['team1Players'] || ''),
+      team2Players: String(row['Team_2_Players'] || row['team2Players'] || ''),
       t1Tactics: null,
-      t2Tactics: null
-    })); [cite: 6]
+      t2Tactics: null,
+    }));
   } catch (err) {
-    console.error("[Voting] CSV fetch error:", err.message); [cite: 7]
+    console.error('[Voting] CSV fetch error:', err.message);
     return [];
   }
 }
 
-// Fetch saved Type A live matches from the Google deployment [cite: 8]
 async function fetchTypeAMatches() {
   try {
-    const res = await axios.get(`${VOTING_BRIDGE_URL}?action=getLiveMatches`, { maxRedirects: 5, timeout: 8000 }); [cite: 9]
-    const raw = res.data; [cite: 10]
-    const list = Array.isArray(raw) ? raw : Array.isArray(raw?.matches) ? raw.matches : []; [cite: 10]
-    return list.map(m => ({ ...m, matchType: "A" })); [cite: 11]
+    const res = await axios.get(`${VOTING_BRIDGE_URL}?action=getLiveMatches`, { maxRedirects: 5, timeout: 8000 });
+    const raw = res.data;
+    const list = Array.isArray(raw) ? raw : Array.isArray(raw?.matches) ? raw.matches : [];
+    return list.map(m => ({ ...m, matchType: 'A' }));
   } catch (err) {
-    console.error("[Voting] Bridge live matches fetch error:", err.message); [cite: 11]
+    console.error('[Voting] Bridge live matches fetch error:', err.message);
     return [];
   }
 }
 
-// Merge collections together, giving precedence to live data if IDs match [cite: 12, 13]
 async function fetchVotingMatches() {
-  const [typeB, typeA] = await Promise.all([fetchTypeBMatches(), fetchTypeAMatches()]); [cite: 13]
-  const merged = [...typeB]; [cite: 14]
+  const [typeB, typeA] = await Promise.all([fetchTypeBMatches(), fetchTypeAMatches()]);
+  const merged = [...typeB];
   for (const am of typeA) {
-    const idx = merged.findIndex(m => String(m.matchId) === String(am.matchId)); [cite: 14]
-    if (idx !== -1) merged[idx] = am; [cite: 15]
-    else merged.push(am); [cite: 15]
+    const idx = merged.findIndex(m => String(m.matchId) === String(am.matchId));
+    if (idx !== -1) merged[idx] = am;
+    else merged.push(am);
   }
-  return merged; [cite: 15]
+  return merged;
 }
 
+// FIX: refreshVotingMatches now ONLY updates votingState.votingMatches.
+// It never touches draftState, so draft resets cannot wipe vote data, and
+// vote refreshes cannot accidentally reset draft fields.
 async function refreshVotingMatches() {
   try {
-    gameState.votingMatches = await fetchVotingMatches(); [cite: 17]
-    io.emit('gameStateUpdate', gameState); [cite: 17]
-    console.log(`[Voting] Refreshed – ${gameState.votingMatches.length} matches total`); [cite: 17]
+    votingState.votingMatches = await fetchVotingMatches();
+    broadcastState();
+    console.log(`[Voting] Refreshed – ${votingState.votingMatches.length} matches total`);
   } catch (err) {
-    console.error("[Voting] refreshVotingMatches failed:", err.message); [cite: 18]
+    console.error('[Voting] refreshVotingMatches failed:', err.message);
   }
 }
 
-// Automatically poll changes in background every 60 seconds [cite: 18]
-setInterval(refreshVotingMatches, 60000); [cite: 18]
+// Background poll every 60 seconds – only touches votingState, never draftState.
+setInterval(refreshVotingMatches, 60000);
 
 // ── Cloudflare Handshake ──────────────────────────────────────────────────────
 async function getSecureStream() {
-  if (!CF_CONFIG.token || !CF_CONFIG.accId || !CF_CONFIG.uid) return null; [cite: 19]
+  if (!CF_CONFIG.token || !CF_CONFIG.accId || !CF_CONFIG.uid) return null;
   try {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_CONFIG.accId}/stream/${CF_CONFIG.uid}/token`; [cite: 20]
-    const res = await axios.post(url, {}, { headers: { 'Authorization': `Bearer ${CF_CONFIG.token}`, 'Content-Type': 'application/json' } }); [cite: 20]
-    if (res.data?.result?.token) { [cite: 21]
-      return `https://customer-v7ps8f9e01.cloudflarestream.com/${res.data.result.token}/iframe`; [cite: 21]
+    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_CONFIG.accId}/stream/${CF_CONFIG.uid}/token`;
+    const res = await axios.post(url, {}, { headers: { Authorization: `Bearer ${CF_CONFIG.token}`, 'Content-Type': 'application/json' } });
+    if (res.data?.result?.token) {
+      return `https://customer-v7ps8f9e01.cloudflarestream.com/${res.data.result.token}/iframe`;
     }
     return null;
   } catch (err) {
-    console.error("[CF] Handshake failed:", err.message); [cite: 21]
+    console.error('[CF] Handshake failed:', err.message);
     return null;
   }
 }
 
-//  ════════════════════════════════════════════════════════════════════════════
-//  SOCKET CONNECTIONS
-//  ════════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════
+// SOCKET CONNECTIONS
+// ════════════════════════════════════════════════════════════════════════════
 io.on('connection', async (socket) => {
-  if (gameState.votingMatches.length === 0) { [cite: 22]
-    await refreshVotingMatches(); [cite: 22]
+  if (votingState.votingMatches.length === 0) {
+    await refreshVotingMatches();
   }
-  socket.emit('gameStateUpdate', gameState); [cite: 22]
 
-  // --- CORE DRAFT MECHANICS HANDLERS (UNTOUCHED) --- [cite: 22]
+  socket.emit('gameStateUpdate', buildGameState());
+
+  // ── CORE DRAFT MECHANICS ──────────────────────────────────────────────────
+
   socket.on('claimReferee', (token) => {
-    if (token === "eric_ref_2024") {
-      gameState.refereeId = socket.id;
-      io.emit('gameStateUpdate', gameState);
+    if (token === 'eric_ref_2024') {
+      draftState.refereeId = socket.id;
+      broadcastState();
       socket.emit('refConfirm', true);
     }
   });
@@ -150,219 +178,352 @@ io.on('connection', async (socket) => {
   socket.on('joinWaitingRoom', async (data) => {
     const name = data.name?.trim();
     const txId = data.ticketCode?.trim();
-    if (!txId || !name) return; [cite: 22, 98]
-    const alreadyActive = gameState.allViewers.find(v => v.txId === txId && v.id !== socket.id); [cite: 23]
-    if (alreadyActive) return socket.emit('error', 'Iyi code iri gukoreshwa n\'undi muntu.'); [cite: 24]
+    if (!txId || !name) return;
+
+    const alreadyActive = draftState.allViewers.find(v => v.txId === txId && v.id !== socket.id);
+    if (alreadyActive) return socket.emit('error', "Iyi code iri gukoreshwa n'undi muntu.");
+
     try {
-      const verificationUrl = `${SENTINEL_URL}?code=${txId}&name=${encodeURIComponent(name)}`; [cite: 24]
-      const response = await axios.get(verificationUrl, { maxRedirects: 5 }); [cite: 25]
-      if (response.data && response.data.valid) { [cite: 25]
-        const amount = Number(response.data.amount) || 0; [cite: 25]
-        let secureLink = (amount >= 2000) ? await getSecureStream() : null; [cite: 26]
-        let userIdx = gameState.allViewers.findIndex(v => v.txId === txId); [cite: 26]
-        if (userIdx !== -1) { [cite: 26]
-          gameState.allViewers[userIdx].id = socket.id; [cite: 27]
-          gameState.allViewers[userIdx].secureLink = secureLink; [cite: 27]
-          gameState.allViewers[userIdx].isPremium = (amount >= 2000); [cite: 27]
-          if (gameState.team1Player?.txId === txId) gameState.team1Player.id = socket.id; [cite: 28]
-          if (gameState.team2Player?.txId === txId) gameState.team2Player.id = socket.id; [cite: 28]
+      const verificationUrl = `${SENTINEL_URL}?code=${txId}&name=${encodeURIComponent(name)}`;
+      const response = await axios.get(verificationUrl, { maxRedirects: 5 });
+      if (response.data && response.data.valid) {
+        const amount = Number(response.data.amount) || 0;
+        let secureLink = amount >= 2000 ? await getSecureStream() : null;
+        let userIdx = draftState.allViewers.findIndex(v => v.txId === txId);
+
+        if (userIdx !== -1) {
+          draftState.allViewers[userIdx].id = socket.id;
+          draftState.allViewers[userIdx].secureLink = secureLink;
+          draftState.allViewers[userIdx].isPremium = amount >= 2000;
+          if (draftState.team1Player?.txId === txId) draftState.team1Player.id = socket.id;
+          if (draftState.team2Player?.txId === txId) draftState.team2Player.id = socket.id;
         } else {
-          gameState.allViewers.push({ id: socket.id, name, role: 'spectator', txId, isPremium: (amount >= 2000), secureLink }); [cite: 29]
+          draftState.allViewers.push({
+            id: socket.id,
+            name,
+            role: 'spectator',
+            txId,
+            isPremium: amount >= 2000,
+            secureLink
+          });
         }
-        io.emit('gameStateUpdate', gameState); [cite: 29]
+
+        broadcastState();
       } else {
-        socket.emit('error', 'Iyi code ntizwi cyangwa ntiyishyuwe.'); [cite: 30]
+        socket.emit('error', 'Iyi code ntizwi cyangwa ntiyishyuwe.');
       }
     } catch {
-      socket.emit('error', 'Sentinel Error'); [cite: 30]
+      socket.emit('error', 'Sentinel Error');
     }
   });
 
-  socket.on('refUpdateBanner', (url) => { if (socket.id === gameState.refereeId) { gameState.arenaBanner = url; io.emit('gameStateUpdate', gameState); } });
+  socket.on('refUpdateBanner', (url) => {
+    if (socket.id !== draftState.refereeId) return;
+    draftState.arenaBanner = url;
+    broadcastState();
+  });
+
   socket.on('refAssignRole', (data) => {
-    if (socket.id !== gameState.refereeId) return; [cite: 32]
-    const user = gameState.allViewers.find(v => v.id === data.userId); [cite: 32]
+    if (socket.id !== draftState.refereeId) return;
+    const user = draftState.allViewers.find(v => v.id === data.userId);
     if (user) {
-      user.role = data.role; [cite: 32]
-      if (data.role === 'team1') gameState.team1Player = { id: user.id, name: user.name, txId: user.txId }; [cite: 32]
-      if (data.role === 'team2') gameState.team2Player = { id: user.id, name: user.name, txId: user.txId }; [cite: 32]
-      io.emit('gameStateUpdate', gameState); [cite: 32]
+      user.role = data.role;
+      if (data.role === 'team1') draftState.team1Player = { id: user.id, name: user.name, txId: user.txId };
+      if (data.role === 'team2') draftState.team2Player = { id: user.id, name: user.name, txId: user.txId };
+      broadcastState();
     }
   });
 
   socket.on('refStartDraft', async () => {
-    if (socket.id !== gameState.refereeId) return; [cite: 33]
+    if (socket.id !== draftState.refereeId) return;
+
     try {
-      const response = await axios.get(process.env.SHEET_URL); [cite: 33]
-      gameState.availableCards = (await csv().fromString(response.data)).slice(0, 100); [cite: 33]
-      gameState.gameStarted = true; gameState.matchLocked = false; [cite: 33]
-      gameState.team1Picks = []; gameState.team2Picks = []; [cite: 33]
-      gameState.team1Tactics = {}; gameState.team2Tactics = {}; [cite: 33]
-      gameState.currentTurn = "team1"; [cite: 33]
-      io.emit('gameStateUpdate', gameState); io.emit('gameSyncPhase', 'DRAFT'); [cite: 33]
-    } catch { console.log("[Draft] Start error"); }
-  });
+      const response = await axios.get(process.env.SHEET_URL, { timeout: 10000 });
+      draftState.availableCards = (await csv().fromString(response.data)).slice(0, 100);
+      draftState.gameStarted = true;
+      draftState.matchLocked = false;
+      draftState.team1Picks = [];
+      draftState.team2Picks = [];
+      draftState.team1Tactics = {};
+      draftState.team2Tactics = {};
+      draftState.currentTurn = 'team1';
+      draftState.team1Formation = '4-4-2';
+      draftState.team2Formation = '4-4-2';
 
-  socket.on('refReset', () => {
-    if (socket.id !== gameState.refereeId) return; [cite: 34]
-    gameState.gameStarted = false; gameState.matchLocked = false; [cite: 34]
-    gameState.team1Picks = []; gameState.team2Picks = []; [cite: 34]
-    gameState.team1Tactics = {}; gameState.team2Tactics = {}; [cite: 34]
-    gameState.team1Player = null; gameState.team2Player = null; [cite: 34]
-    gameState.allViewers.forEach(v => (v.role = 'spectator')); [cite: 34]
-    io.emit('gameStateUpdate', gameState); io.emit('gameSyncPhase', 'LOBBY'); [cite: 34]
-  });
-
-  socket.on('refClearArena', () => {
-    if (socket.id !== gameState.refereeId) return; [cite: 35]
-    gameState.allViewers = []; gameState.gameStarted = false; [cite: 35]
-    gameState.qrCodes = ["", "", "", "", "", ""]; gameState.youtubeLink = "https://www.youtube.com"; gameState.arenaBanner = ""; [cite: 35]
-    io.emit('clearArenaForce'); io.emit('gameStateUpdate', gameState); [cite: 35]
-  });
-
-  socket.on('refUpdateYoutube', (link) => { if (socket.id === gameState.refereeId) { gameState.youtubeLink = link; io.emit('gameStateUpdate', gameState); } });
-  socket.on('refUpdateQRs', (qrs) => { if (socket.id === gameState.refereeId) { gameState.qrCodes = qrs; io.emit('gameStateUpdate', gameState); } });
-  socket.on('refLockMatch', () => { if (socket.id === gameState.refereeId) { gameState.matchLocked = true; io.emit('gameStateUpdate', gameState); } });
-  
-  socket.on('playerPickCard', (cardId) => {
-    const user = gameState.allViewers.find(v => v.id === socket.id); [cite: 39]
-    if (!user || user.role !== gameState.currentTurn) return; [cite: 39]
-    const card = gameState.availableCards.find(c => c.id === cardId); [cite: 39]
-    if (card) {
-      const myTeam = user.role === 'team1' ? gameState.team1Picks : gameState.team2Picks; [cite: 39]
-      if (myTeam.length >= 11) return; [cite: 39]
-      myTeam.push(card); [cite: 39]
-      gameState.availableCards = gameState.availableCards.filter(c => c.id !== cardId); [cite: 39]
-      const otherTeam = user.role === 'team1' ? 'team2' : 'team1'; [cite: 39]
-      const otherPicks = user.role === 'team1' ? gameState.team2Picks : gameState.team1Picks; [cite: 39]
-      if (gameState.team1Picks.length >= 11 && gameState.team2Picks.length >= 11) { [cite: 39]
-        gameState.currentTurn = "FINISHED"; [cite: 39]
-      } else {
-        gameState.currentTurn = (otherPicks.length < 11) ? otherTeam : user.role; [cite: 39]
-      }
-      io.emit('gameStateUpdate', gameState); [cite: 39]
+      broadcastState();
+      io.emit('gameSyncPhase', 'DRAFT');
+    } catch (err) {
+      console.error('[Draft] Start error:', err.message);
+      socket.emit('error', 'Draft start failed – could not load player cards. Please retry.');
     }
   });
 
+  socket.on('refReset', () => {
+    if (socket.id !== draftState.refereeId) return;
+
+    draftState.gameStarted = false;
+    draftState.matchLocked = false;
+    draftState.availableCards = [];
+    draftState.team1Picks = [];
+    draftState.team2Picks = [];
+    draftState.team1Tactics = {};
+    draftState.team2Tactics = {};
+    draftState.team1Player = null;
+    draftState.team2Player = null;
+    draftState.currentTurn = 'team1';
+    draftState.team1Formation = '4-4-2';
+    draftState.team2Formation = '4-4-2';
+    draftState.allViewers.forEach(v => (v.role = 'spectator'));
+
+    broadcastState();
+    io.emit('gameSyncPhase', 'LOBBY');
+  });
+
+  socket.on('refClearArena', () => {
+    if (socket.id !== draftState.refereeId) return;
+
+    draftState.allViewers = [];
+    draftState.gameStarted = false;
+    draftState.matchLocked = false;
+    draftState.availableCards = [];
+    draftState.team1Picks = [];
+    draftState.team2Picks = [];
+    draftState.team1Tactics = {};
+    draftState.team2Tactics = {};
+    draftState.team1Player = null;
+    draftState.team2Player = null;
+    draftState.currentTurn = 'team1';
+    draftState.team1Formation = '4-4-2';
+    draftState.team2Formation = '4-4-2';
+    draftState.qrCodes = ['', '', '', '', '', ''];
+    draftState.youtubeLink = 'https://www.youtube.com';
+    draftState.arenaBanner = '';
+
+    io.emit('clearArenaForce');
+    broadcastState();
+  });
+
+  socket.on('refUpdateYoutube', (link) => {
+    if (socket.id !== draftState.refereeId) return;
+    draftState.youtubeLink = link;
+    broadcastState();
+  });
+
+  socket.on('refUpdateQRs', (qrs) => {
+    if (socket.id !== draftState.refereeId) return;
+    draftState.qrCodes = qrs;
+    broadcastState();
+  });
+
+  socket.on('refLockMatch', () => {
+    if (socket.id !== draftState.refereeId) return;
+    draftState.matchLocked = true;
+    broadcastState();
+  });
+
+  socket.on('playerPickCard', (cardId) => {
+    const user = draftState.allViewers.find(v => v.id === socket.id);
+    if (!user || user.role !== draftState.currentTurn) return;
+
+    const card = draftState.availableCards.find(c => c.id === cardId);
+    if (!card) return;
+
+    const myTeam = user.role === 'team1' ? draftState.team1Picks : draftState.team2Picks;
+    if (myTeam.length >= 11) return;
+
+    myTeam.push(card);
+    draftState.availableCards = draftState.availableCards.filter(c => c.id !== cardId);
+
+    const otherTeam = user.role === 'team1' ? 'team2' : 'team1';
+    const otherPicks = user.role === 'team1' ? draftState.team2Picks : draftState.team1Picks;
+
+    if (draftState.team1Picks.length >= 11 && draftState.team2Picks.length >= 11) {
+      draftState.currentTurn = 'FINISHED';
+    } else {
+      draftState.currentTurn = otherPicks.length < 11 ? otherTeam : user.role;
+    }
+
+    broadcastState();
+  });
+
   socket.on('playerSetPosition', (data) => {
-    if (gameState.matchLocked) return; [cite: 40]
-    const user = gameState.allViewers.find(v => v.id === socket.id); [cite: 40]
-    if (!user || !user.role.startsWith('team')) return; [cite: 40]
-    const tactics = gameState[`${user.role}Tactics`]; [cite: 40]
-    const picks = gameState[`${user.role}Picks`]; [cite: 40]
-    const card = picks.find(p => p.id === data.cardId); [cite: 40]
+    if (draftState.matchLocked) return;
+
+    const user = draftState.allViewers.find(v => v.id === socket.id);
+    if (!user || !user.role.startsWith('team')) return;
+
+    const tactics = draftState[`${user.role}Tactics`];
+    const picks = draftState[`${user.role}Picks`];
+    const card = picks.find(p => p.id === data.cardId);
+
     if (card) {
-      Object.keys(tactics).forEach(k => { if (tactics[k].id === data.cardId) delete tactics[k]; }); [cite: 40]
-      tactics[data.slotIndex] = card; [cite: 40]
-      io.emit('gameStateUpdate', gameState); [cite: 40]
+      Object.keys(tactics).forEach(k => {
+        if (tactics[k].id === data.cardId) delete tactics[k];
+      });
+      tactics[data.slotIndex] = card;
+      broadcastState();
     }
   });
 
   socket.on('playerSetFormation', (formation) => {
-    if (gameState.matchLocked) return; [cite: 41]
-    const user = gameState.allViewers.find(v => v.id === socket.id); [cite: 41]
-    if (!user || !user.role.startsWith('team')) return; [cite: 41]
-    gameState[`${user.role}Formation`] = formation; [cite: 41]
-    gameState[`${user.role}Tactics`] = {}; [cite: 41]
-    io.emit('gameStateUpdate', gameState); [cite: 41]
+    if (draftState.matchLocked) return;
+
+    const user = draftState.allViewers.find(v => v.id === socket.id);
+    if (!user || !user.role.startsWith('team')) return;
+
+    draftState[`${user.role}Formation`] = formation;
+    draftState[`${user.role}Tactics`] = {};
+    broadcastState();
   });
 
-  // --- NEW: VOTING ENGINE SOCKET LISTENERS --- [cite: 42]
-  
-  // Referee saves the active canvas team to sheet [cite: 42]
+  // ── VOTING ENGINE SOCKET LISTENERS ───────────────────────────────────────
+
   socket.on('refSaveLiveSession', async () => {
-    if (socket.id !== gameState.refereeId) return; [cite: 44]
-    if (!gameState.matchLocked) { [cite: 44]
-      return socket.emit('refSaveLiveSession_ack', { success: false, error: 'Match must be locked before saving.' }); [cite: 44]
+    if (socket.id !== draftState.refereeId) return;
+
+    if (!draftState.matchLocked) {
+      return socket.emit('refSaveLiveSession_ack', {
+        success: false,
+        error: 'Match must be locked before saving.'
+      });
     }
-    const coach1 = gameState.team1Player?.name || "Coach 1"; [cite: 44]
-    const coach2 = gameState.team2Player?.name || "Coach 2"; [cite: 44]
-    const matchId = Date.now(); [cite: 44]
-    
+
+    const coach1 = draftState.team1Player?.name || 'Coach 1';
+    const coach2 = draftState.team2Player?.name || 'Coach 2';
+    const matchId = Date.now();
+
     const payload = {
-      action: "saveLiveMatch",
+      action: 'saveLiveMatch',
       matchId,
       name: `Live Session – ${coach1} vs ${coach2}`,
       coach1,
       coach2,
-      t1Tactics: JSON.stringify(gameState.team1Tactics),
-      t2Tactics: JSON.stringify(gameState.team2Tactics)
-    }; [cite: 44]
+      t1Tactics: JSON.stringify(draftState.team1Tactics),
+      t2Tactics: JSON.stringify(draftState.team2Tactics),
+    };
 
     try {
-      await axios.post(VOTING_BRIDGE_URL, payload, { headers: { 'Content-Type': 'application/json' }, maxRedirects: 5, timeout: 10000 }); [cite: 44]
-      await refreshVotingMatches(); [cite: 44, 45]
-      socket.emit('refSaveLiveSession_ack', { success: true, matchId }); [cite: 45]
+      await axios.post(VOTING_BRIDGE_URL, payload, {
+        headers: { 'Content-Type': 'application/json' },
+        maxRedirects: 5,
+        timeout: 10000
+      });
+
+      await refreshVotingMatches();
+      socket.emit('refSaveLiveSession_ack', { success: true, matchId });
     } catch (err) {
-      console.error("[Voting] saveLiveMatch error:", err.message); [cite: 46]
-      socket.emit('refSaveLiveSession_ack', { success: false, error: err.message }); [cite: 46]
+      console.error('[Voting] saveLiveMatch error:', err.message);
+      socket.emit('refSaveLiveSession_ack', {
+        success: false,
+        error: err.message
+      });
     }
   });
 
-  // Referee changes a game state between OPEN and CLOSED [cite: 47]
   socket.on('refToggleVotingStatus', async ({ matchId, matchType, newStatus }) => {
-    if (socket.id !== gameState.refereeId) return; [cite: 50]
-    
-    // Optimistic local update so users feel no delay [cite: 50]
-    const idx = gameState.votingMatches.findIndex(m => String(m.matchId) === String(matchId)); [cite: 50]
+    if (socket.id !== draftState.refereeId) return;
+
+    const idx = votingState.votingMatches.findIndex(
+      m => String(m.matchId) === String(matchId)
+    );
+
     if (idx !== -1) {
-      gameState.votingMatches[idx].status = newStatus; [cite: 50]
-      io.emit('gameStateUpdate', gameState); [cite: 50]
+      votingState.votingMatches[idx].status = newStatus;
+      broadcastState();
     }
 
     try {
-      await axios.post(VOTING_BRIDGE_URL, { action: "toggleVotingStatus", matchId, matchType, newStatus }, { headers: { 'Content-Type': 'application/json' }, maxRedirects: 5, timeout: 10000 }); [cite: 50]
+      await axios.post(
+        VOTING_BRIDGE_URL,
+        { action: 'toggleVotingStatus', matchId, matchType, newStatus },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          maxRedirects: 5,
+          timeout: 10000
+        }
+      );
     } catch (err) {
-      console.error("[Voting] toggleVotingStatus sync error:", err.message); [cite: 50]
+      console.error('[Voting] toggleVotingStatus sync error:', err.message);
     }
   });
 
-  // Referee-Exclusive: Pull raw calculations 
   socket.on('refGetBallots', async ({ matchId }) => {
-    if (socket.id !== gameState.refereeId) return; [cite: 54]
+    if (socket.id !== draftState.refereeId) return;
+
     try {
-      const res = await axios.get(`${VOTING_BRIDGE_URL}?action=getBallots&matchId=${encodeURIComponent(matchId)}`, { maxRedirects: 5, timeout: 12000 }); [cite: 54]
-      const ballots = Array.isArray(res.data) ? res.data : Array.isArray(res.data?.ballots) ? res.data.ballots : []; [cite: 54]
-      socket.emit('refBallotData', { matchId, ballots }); [cite: 54]
+      const res = await axios.get(
+        `${VOTING_BRIDGE_URL}?action=getBallots&matchId=${encodeURIComponent(matchId)}`,
+        { maxRedirects: 5, timeout: 12000 }
+      );
+
+      const ballots = Array.isArray(res.data)
+        ? res.data
+        : Array.isArray(res.data?.ballots)
+          ? res.data.ballots
+          : [];
+
+      socket.emit('refBallotData', { matchId, ballots });
     } catch (err) {
-      console.error("[Voting] getBallots error:", err.message); [cite: 54]
-      socket.emit('refBallotData', { matchId, ballots: [], error: err.message }); [cite: 54]
+      console.error('[Voting] getBallots error:', err.message);
+      socket.emit('refBallotData', { matchId, ballots: [], error: err.message });
     }
   });
 
   socket.on('refRefreshVotingMatches', async () => {
-    if (socket.id !== gameState.refereeId) return; [cite: 57]
-    await refreshVotingMatches(); [cite: 57]
+    if (socket.id !== draftState.refereeId) return;
+    await refreshVotingMatches();
   });
 
-  // Fans post their ballots blindly [cite: 58]
   socket.on('fanSubmitBallot', async ({ txId, matchId, coachVote, scores }) => {
-    const viewer = gameState.allViewers.find(v => v.id === socket.id && v.txId === txId); [cite: 63]
-    if (!viewer) return socket.emit('ballotResult', { error: 'NOT_VERIFIED' }); [cite: 63]
+    const viewer = draftState.allViewers.find(
+      v => v.id === socket.id && v.txId === txId
+    );
 
-    const match = gameState.votingMatches.find(m => String(m.matchId) === String(matchId)); [cite: 63]
-    if (!match || match.status !== "OPEN") return socket.emit('ballotResult', { error: 'MATCH_CLOSED' }); [cite: 63]
+    if (!viewer) {
+      return socket.emit('ballotResult', { error: 'NOT_VERIFIED' });
+    }
+
+    const match = votingState.votingMatches.find(
+      m => String(m.matchId) === String(matchId)
+    );
+
+    if (!match || match.status !== 'OPEN') {
+      return socket.emit('ballotResult', { error: 'MATCH_CLOSED' });
+    }
 
     try {
-      const res = await axios.post(VOTING_BRIDGE_URL, { action: "submitBallot", txId, matchId, coachVote, scores }, { headers: { 'Content-Type': 'application/json' }, maxRedirects: 5, timeout: 12000 }); [cite: 63, 64]
-      const data = res.data; [cite: 64]
-      const alreadyVoted = data === "ALREADY_VOTED" || data?.error === "ALREADY_VOTED" || data?.result === "ALREADY_VOTED"; [cite: 64]
-      
+      const res = await axios.post(
+        VOTING_BRIDGE_URL,
+        { action: 'submitBallot', txId, matchId, coachVote, scores },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          maxRedirects: 5,
+          timeout: 12000
+        }
+      );
+
+      const data = res.data;
+      const alreadyVoted =
+        data === 'ALREADY_VOTED' ||
+        data?.error === 'ALREADY_VOTED' ||
+        data?.result === 'ALREADY_VOTED';
+
       if (alreadyVoted) {
-        return socket.emit('ballotResult', { error: 'ALREADY_VOTED' }); [cite: 65]
+        return socket.emit('ballotResult', { error: 'ALREADY_VOTED' });
       }
-      socket.emit('ballotResult', { success: true }); [cite: 65]
+
+      socket.emit('ballotResult', { success: true });
     } catch (err) {
-      console.error("[Voting] submitBallot network error:", err.message); [cite: 66]
-      socket.emit('ballotResult', { error: 'SERVER_ERROR' }); [cite: 66]
+      console.error('[Voting] submitBallot network error:', err.message);
+      socket.emit('ballotResult', { error: 'SERVER_ERROR' });
     }
   });
 });
 
-app.get('/health', (_req, res) => res.status(200).send('Arena Engine is Awake')); [cite: 67]
+app.get('/health', (_req, res) => res.status(200).send('Arena Engine is Awake'));
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`Arena Backend Masterpiece Online — port ${PORT}`); [cite: 69]
-  refreshVotingMatches(); [cite: 69]
+  console.log(`Arena Backend Masterpiece Online — port ${PORT}`);
+  refreshVotingMatches();
 });
