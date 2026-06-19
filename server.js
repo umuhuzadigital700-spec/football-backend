@@ -11,7 +11,6 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
-// ── Socket.io (Render.com persistent Node.js server — NOT serverless) ─────────
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] }
 });
@@ -19,7 +18,9 @@ const io = new Server(server, {
 // ── External Endpoints ─────────────────────────────────────────────────────────
 const SENTINEL_URL = "https://script.google.com/macros/s/AKfycby_FXyDMq0K0dW2kpRuaW0NdSTEy-9X8JrHIttJdjpadXs0cKV9Lr9Hg2EKY9pJhGdU/exec";
 const VOTING_BRIDGE_URL = "https://script.google.com/macros/s/AKfycbwqSMQT__Dr_XBQ_MKGejF9uGEydol66clmztRRGojgfoqnYQ7iyGQ7RsWQoF2iILv9cA/exec";
-const VOTING_CSV_URL = "https://docs.google.com/spreadsheets/d/1K1AFepyqCMKYSeoaQ40wn18_uRF4vLfA0ckPMZxcisg/gviz/tq?tqx=out:csv&sheet=Voting_Matches";
+// Multi-tab Type B: base spreadsheet ID — tabs will be indexed dynamically
+const VOTING_SHEET_BASE_URL = "https://docs.google.com/spreadsheets/d/1K1AFepyqCMKYSeoaQ40wn18_uRF4vLfA0ckPMZxcisg/gviz/tq?tqx=out:csv&sheet=";
+const VOTING_CSV_URL = `${VOTING_SHEET_BASE_URL}Voting_Matches`;
 
 // ── Cloudflare Config ──────────────────────────────────────────────────────────
 const CF_CONFIG = {
@@ -33,7 +34,7 @@ const CF_CONFIG = {
 // ══════════════════════════════════════════════════════════════════════════════
 
 let draftState = {
-  refereeId: null,          // socket.id of the current referee
+  refereeId: null,
   allViewers: [],
   availableCards: [],
   team1Picks: [],
@@ -42,44 +43,43 @@ let draftState = {
   team2Player: null,
   currentTurn: 'team1',
   gameStarted: false,
+  // matchLocked = tactics stage locked (legacy). matchReady = full lockout.
   matchLocked: false,
+  matchReady: false,           // NEW: "Match Ready" final lockout
   youtubeLink: 'https://www.youtube.com',
   arenaBanner: '',
   qrCodes: ['', '', '', '', '', ''],
   team1Formation: '4-4-2',
   team2Formation: '4-4-2',
-  team1Tactics: {},
+  team1Tactics: {},            // { [slotIndex]: cardObject }
   team2Tactics: {},
-
-  // ── NEW: Room phase state (non-destructive navigation) ─────────────────────
-  // Phases: 'LOBBY' | 'DRAFT' | 'VOTING'
-  roomPhase: 'LOBBY',
-
-  // ── NEW: Persistent saved live sessions (accumulate across resets) ──────────
-  savedLiveSessions: [],
-
-  // ── NEW: Master voting gate (Ref must explicitly unlock) ───────────────────
-  votingAllowed: false,
+  roomPhase: 'LOBBY',          // 'LOBBY' | 'DRAFT' | 'VOTING'
+  savedLiveSessions: [],       // accumulates across resets — never wiped on reset
+  votingAllowed: false,        // master gate
+  // Spec §6: targeted mode — null | 'A' | 'B' | 'BOTH'
+  votingMode: null,
 };
 
 let votingState = {
   votingMatches: [],
-  // ── NEW: Anti-double vote registry { [matchId]: Set<txId> } ────────────────
-  voteRegistry: {},
-  // Ballot storage: { [matchId]: [ { txId, coachVote, scores } ] }
-  ballots: {},
+  voteRegistry: {},            // { [matchId]: Set<txId> }
+  ballots: {},                 // { [matchId]: [{ txId, coachVote, teamVote, scores, ... }] }
 };
 
 function buildGameState() {
-  // Serialize voteRegistry as plain object (Sets are not JSON-serializable)
   const safeRegistry = {};
   for (const [mid, set] of Object.entries(votingState.voteRegistry)) {
     safeRegistry[mid] = [...set];
   }
+  // Compute live aggregate stats for Ref dashboard (Spec §5.3)
+  const typeAStats = computeTypeAStats();
+  const typeBStats = computeTypeBStats();
   return {
     ...draftState,
     votingMatches: votingState.votingMatches,
     voteRegistry: safeRegistry,
+    typeAStats,
+    typeBStats,
   };
 }
 
@@ -87,26 +87,81 @@ function broadcastState() {
   io.emit('gameStateUpdate', buildGameState());
 }
 
+// ── Live Aggregate Stats ───────────────────────────────────────────────────────
+function computeTypeAStats() {
+  // Returns { [matchId]: { team1Votes: N, team2Votes: N } }
+  const stats = {};
+  const typeAMatches = votingState.votingMatches.filter(m => m.matchType === 'A');
+  for (const m of typeAMatches) {
+    const ballots = votingState.ballots[m.matchId] || [];
+    stats[m.matchId] = {
+      matchName: m.name,
+      team1Votes: ballots.filter(b => b.teamVote === 'team1').length,
+      team2Votes: ballots.filter(b => b.teamVote === 'team2').length,
+    };
+  }
+  return stats;
+}
+
+function computeTypeBStats() {
+  // Returns { [matchId]: { [participantName]: averageScore } }
+  const stats = {};
+  const typeBMatches = votingState.votingMatches.filter(m => m.matchType === 'B');
+  for (const m of typeBMatches) {
+    const ballots = votingState.ballots[m.matchId] || [];
+    if (!ballots.length) { stats[m.matchId] = {}; continue; }
+    const totals = {};
+    const counts = {};
+    for (const b of ballots) {
+      if (!b.scores) continue;
+      for (const [name, score] of Object.entries(b.scores)) {
+        totals[name] = (totals[name] || 0) + Number(score);
+        counts[name] = (counts[name] || 0) + 1;
+      }
+    }
+    stats[m.matchId] = {};
+    for (const name of Object.keys(totals)) {
+      stats[m.matchId][name] = (totals[name] / counts[name]).toFixed(2);
+    }
+  }
+  return stats;
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // VOTING ENGINE HELPERS
 // ══════════════════════════════════════════════════════════════════════════════
 
+// Type B: Spec §4 — fetch MULTIPLE tabs from the Google Sheet
+// Tab names are stored in env var VOTING_SHEET_TABS as comma-separated list
+// e.g. "Match_001,Match_002,Match_003"
+// Falls back to single "Voting_Matches" tab if not set.
 async function fetchTypeBMatches() {
   try {
-    const res = await axios.get(VOTING_CSV_URL, { timeout: 8000 });
-    const rows = await csv().fromString(res.data);
-    return rows.map(row => ({
-      matchId: String(row['Match_ID'] || row['matchId'] || ''),
-      name: String(row['Match_Name'] || row['name'] || 'Unnamed Match'),
-      matchType: 'B',
-      status: String(row['Status'] || row['status'] || 'CLOSED').toUpperCase(),
-      coach1: String(row['Coach_1'] || row['coach1'] || ''),
-      coach2: String(row['Coach_2'] || row['coach2'] || ''),
-      team1Players: String(row['Team_1_Players'] || row['team1Players'] || ''),
-      team2Players: String(row['Team_2_Players'] || row['team2Players'] || ''),
-      t1Tactics: null,
-      t2Tactics: null,
+    const tabsEnv = process.env.VOTING_SHEET_TABS || 'Voting_Matches';
+    const tabs = tabsEnv.split(',').map(t => t.trim()).filter(Boolean);
+    const results = await Promise.all(tabs.map(async (tab) => {
+      try {
+        const res = await axios.get(`${VOTING_SHEET_BASE_URL}${encodeURIComponent(tab)}`, { timeout: 8000 });
+        const rows = await csv().fromString(res.data);
+        return rows.map(row => ({
+          matchId: String(row['Match_ID'] || row['matchId'] || `${tab}_${Math.random()}`),
+          name: String(row['Match_Name'] || row['name'] || `Match (${tab})`),
+          matchType: 'B',
+          status: String(row['Status'] || row['status'] || 'CLOSED').toUpperCase(),
+          coach1: String(row['Coach_1'] || row['coach1'] || ''),
+          coach2: String(row['Coach_2'] || row['coach2'] || ''),
+          referee1: String(row['Referee'] || row['referee'] || ''),
+          commentator1: String(row['Commentator'] || row['commentator'] || ''),
+          team1Players: String(row['Team_1_Players'] || row['team1Players'] || ''),
+          team2Players: String(row['Team_2_Players'] || row['team2Players'] || ''),
+          t1Tactics: null,
+          t2Tactics: null,
+        }));
+      } catch {
+        return [];
+      }
     }));
+    return results.flat();
   } catch (err) {
     console.error('[Voting] CSV fetch error:', err.message);
     return [];
@@ -138,11 +193,11 @@ async function fetchVotingMatches() {
 
 async function refreshVotingMatches() {
   try {
-    // ── NEW Feature 3: Merge savedLiveSessions into votingMatches as Type A ───
     const fetched = await fetchVotingMatches();
+    // Merge in savedLiveSessions as Type A
     const sessionMatches = draftState.savedLiveSessions.map(s => ({
       matchId: s.matchId,
-      name: s.name || `Live Session ${s.matchId}`,
+      name: s.name,
       matchType: 'A',
       status: s.status || 'CLOSED',
       coach1: s.team1Player?.name || '',
@@ -155,7 +210,7 @@ async function refreshVotingMatches() {
     const merged = [...fetched];
     for (const sm of sessionMatches) {
       const idx = merged.findIndex(m => String(m.matchId) === String(sm.matchId));
-      if (idx !== -1) merged[idx] = sm;
+      if (idx !== -1) merged[idx] = { ...merged[idx], ...sm };
       else merged.push(sm);
     }
     votingState.votingMatches = merged;
@@ -184,7 +239,7 @@ async function getSecureStream() {
   }
 }
 
-// ── REST: State polling endpoint (for App.js 3s interval) ─────────────────────
+// ── REST: State polling endpoint ───────────────────────────────────────────────
 app.get('/api/state', (req, res) => {
   res.json(buildGameState());
 });
@@ -195,8 +250,6 @@ app.get('/api/state', (req, res) => {
 
 io.on('connection', (socket) => {
   console.log(`[Socket] Connected: ${socket.id}`);
-
-  // ── Auto-rejoin on reconnect ───────────────────────────────────────────────
   socket.emit('gameStateUpdate', buildGameState());
 
   // ── Claim Referee ──────────────────────────────────────────────────────────
@@ -208,26 +261,19 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── Join Waiting Room ──────────────────────────────────────────────────────
-  // NEW Feature 6: Smart error suppression — distinguish refresh vs new unauthorized device
+  // ── Join Waiting Room — Smart reconnect (Spec §7) ──────────────────────────
   socket.on('joinWaitingRoom', async ({ name, ticketCode } = {}) => {
     if (!ticketCode || !name) return;
-
     const existingUser = draftState.allViewers.find(v => v.txId === ticketCode);
-
     if (existingUser) {
-      // User is already authenticated — this is a page refresh. Silently update socket ID.
+      // Silent re-bind — page refresh, not a new device
       existingUser.id = socket.id;
       if (draftState.team1Player?.txId === ticketCode) draftState.team1Player.id = socket.id;
       if (draftState.team2Player?.txId === ticketCode) draftState.team2Player.id = socket.id;
       socket.emit('gameStateUpdate', buildGameState());
       broadcastState();
-      return; // No error popup — silent re-auth
+      return;
     }
-
-    // Check for another ACTIVE socket using same ticketCode from a DIFFERENT machine
-    // (existingUser would have been found above if it was a refresh)
-    // At this point, no record exists → proceed with fresh verification
     try {
       const verificationUrl = `${SENTINEL_URL}?code=${ticketCode}&name=${encodeURIComponent(name)}`;
       const response = await axios.get(verificationUrl, { maxRedirects: 5 });
@@ -251,7 +297,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── Referee Controls ───────────────────────────────────────────────────────
+  // ── Referee: Media controls ────────────────────────────────────────────────
   socket.on('refUpdateYoutube', (link) => {
     if (socket.id !== draftState.refereeId) return;
     draftState.youtubeLink = link;
@@ -270,6 +316,7 @@ io.on('connection', (socket) => {
     broadcastState();
   });
 
+  // ── Referee: Assign role ───────────────────────────────────────────────────
   socket.on('refAssignRole', ({ userId, role } = {}) => {
     if (socket.id !== draftState.refereeId) return;
     const user = draftState.allViewers.find(v => v.id === userId);
@@ -281,6 +328,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ── Referee: Start draft ───────────────────────────────────────────────────
   socket.on('refStartDraft', async () => {
     if (socket.id !== draftState.refereeId) return;
     try {
@@ -288,6 +336,7 @@ io.on('connection', (socket) => {
       draftState.availableCards = (await csv().fromString(response.data)).slice(0, 100);
       draftState.gameStarted = true;
       draftState.matchLocked = false;
+      draftState.matchReady = false;
       draftState.team1Picks = [];
       draftState.team2Picks = [];
       draftState.team1Tactics = {};
@@ -295,7 +344,6 @@ io.on('connection', (socket) => {
       draftState.currentTurn = 'team1';
       draftState.team1Formation = '4-4-2';
       draftState.team2Formation = '4-4-2';
-      // ── NEW Feature 5: Non-destructive phase navigation ────────────────────
       draftState.roomPhase = 'DRAFT';
       broadcastState();
       io.emit('gameSyncPhase', 'DRAFT');
@@ -305,23 +353,35 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ── Referee: Lock match (tactics stage) ───────────────────────────────────
   socket.on('refLockMatch', () => {
     if (socket.id !== draftState.refereeId) return;
     draftState.matchLocked = true;
     broadcastState();
   });
 
-  // ── NEW Feature 3: Save Live Session (persistent, non-destructive) ─────────
+  // ── NEW Spec §2: "Match Ready" — permanent full lockout ───────────────────
+  socket.on('refMatchReady', () => {
+    if (socket.id !== draftState.refereeId) return;
+    draftState.matchReady = true;
+    draftState.matchLocked = true;
+    broadcastState();
+    socket.emit('refMatchReady_ack', { success: true });
+  });
+
+  // ── NEW Spec §3: Save Session for Voting (name = "Coach1 vs Coach2") ───────
   socket.on('refSaveLiveSession', () => {
     if (socket.id !== draftState.refereeId) return;
-    if (!draftState.matchLocked) {
-      socket.emit('refSaveLiveSession_ack', { success: false, error: 'Match must be locked before saving.' });
+    if (!draftState.matchReady) {
+      socket.emit('refSaveLiveSession_ack', { success: false, error: 'Click "Match Ready" first.' });
       return;
     }
     const sessionId = `live_${Date.now()}`;
+    // Name: "Kaka vs Jay" as per spec
+    const sessionName = `${draftState.team1Player?.name || 'Team 1'} vs ${draftState.team2Player?.name || 'Team 2'}`;
     const session = {
       matchId: sessionId,
-      name: `${draftState.team1Player?.name || 'Team 1'} vs ${draftState.team2Player?.name || 'Team 2'} (${new Date().toLocaleTimeString()})`,
+      name: sessionName,
       team1Player: { ...draftState.team1Player },
       team2Player: { ...draftState.team2Player },
       team1Picks: [...draftState.team1Picks],
@@ -334,10 +394,9 @@ io.on('connection', (socket) => {
       savedAt: Date.now(),
     };
     draftState.savedLiveSessions.push(session);
-    // Register into votingMatches immediately
     votingState.votingMatches.push({
       matchId: sessionId,
-      name: session.name,
+      name: sessionName,
       matchType: 'A',
       status: 'CLOSED',
       coach1: session.team1Player?.name || '',
@@ -349,13 +408,47 @@ io.on('connection', (socket) => {
     });
     socket.emit('refSaveLiveSession_ack', { success: true, matchId: sessionId });
     broadcastState();
-    console.log(`[Session] Saved live session: ${sessionId}`);
+    console.log(`[Session] Saved: ${sessionName} (${sessionId})`);
   });
 
-  // ── NEW Feature 5: Non-destructive Reset (preserves savedLiveSessions) ─────
+  // ── Referee: Restart (same players, preserved sessions) ───────────────────
+  socket.on('refRestart', () => {
+    if (socket.id !== draftState.refereeId) return;
+    const preserved = {
+      refereeId: draftState.refereeId,
+      allViewers: draftState.allViewers,
+      team1Player: draftState.team1Player,
+      team2Player: draftState.team2Player,
+      savedLiveSessions: draftState.savedLiveSessions,
+      youtubeLink: draftState.youtubeLink,
+      arenaBanner: draftState.arenaBanner,
+      qrCodes: draftState.qrCodes,
+      votingAllowed: draftState.votingAllowed,
+      votingMode: draftState.votingMode,
+    };
+    draftState = {
+      ...preserved,
+      availableCards: [],
+      team1Picks: [],
+      team2Picks: [],
+      currentTurn: 'team1',
+      gameStarted: false,
+      matchLocked: false,
+      matchReady: false,
+      team1Formation: '4-4-2',
+      team2Formation: '4-4-2',
+      team1Tactics: {},
+      team2Tactics: {},
+      roomPhase: 'LOBBY',
+    };
+    // Keep viewer roles
+    broadcastState();
+    io.emit('gameSyncPhase', 'LOBBY');
+  });
+
+  // ── Referee: Reset (new players, preserve sessions) ───────────────────────
   socket.on('refReset', () => {
     if (socket.id !== draftState.refereeId) return;
-    // Preserve: refereeId, allViewers, savedLiveSessions, youtubeLink, arenaBanner, qrCodes, votingAllowed
     const preserved = {
       refereeId: draftState.refereeId,
       allViewers: draftState.allViewers,
@@ -364,6 +457,7 @@ io.on('connection', (socket) => {
       arenaBanner: draftState.arenaBanner,
       qrCodes: draftState.qrCodes,
       votingAllowed: draftState.votingAllowed,
+      votingMode: draftState.votingMode,
     };
     draftState = {
       ...preserved,
@@ -375,35 +469,34 @@ io.on('connection', (socket) => {
       currentTurn: 'team1',
       gameStarted: false,
       matchLocked: false,
+      matchReady: false,
       team1Formation: '4-4-2',
       team2Formation: '4-4-2',
       team1Tactics: {},
       team2Tactics: {},
       roomPhase: 'LOBBY',
     };
-    // Reset viewer roles to spectator
     draftState.allViewers.forEach(v => { v.role = 'spectator'; });
     broadcastState();
     io.emit('gameSyncPhase', 'LOBBY');
   });
 
-  // ── NEW Feature 5: Room Phase Navigation (Ref-controlled) ─────────────────
+  // ── Referee: Non-destructive phase navigation (Spec §6) ───────────────────
   socket.on('refSetPhase', (phase) => {
     if (socket.id !== draftState.refereeId) return;
     if (!['LOBBY', 'DRAFT', 'VOTING'].includes(phase)) return;
     draftState.roomPhase = phase;
-    // Lock voting if going back from VOTING
-    if (phase !== 'VOTING') {
-      draftState.votingAllowed = false;
-    }
+    if (phase !== 'VOTING') draftState.votingAllowed = false;
     broadcastState();
     io.emit('gameSyncPhase', phase);
   });
 
-  // ── NEW Feature 2: Master Voting Toggle ────────────────────────────────────
-  socket.on('refToggleVotingGate', (allowed) => {
+  // ── Referee: Master voting gate + targeted mode (Spec §6) ─────────────────
+  // payload: { allowed: bool, mode: null | 'A' | 'B' | 'BOTH' }
+  socket.on('refToggleVotingGate', ({ allowed, mode } = {}) => {
     if (socket.id !== draftState.refereeId) return;
     draftState.votingAllowed = !!allowed;
+    draftState.votingMode = allowed ? (mode || 'BOTH') : null;
     if (draftState.votingAllowed) {
       draftState.roomPhase = 'VOTING';
       io.emit('gameSyncPhase', 'VOTING');
@@ -411,73 +504,82 @@ io.on('connection', (socket) => {
     broadcastState();
   });
 
-  // ── Voting: Toggle individual match status (Ref only) ─────────────────────
+  // ── Referee: Toggle individual match status ────────────────────────────────
   socket.on('refToggleVotingStatus', ({ matchId, matchType, newStatus } = {}) => {
     if (socket.id !== draftState.refereeId) return;
     const match = votingState.votingMatches.find(m => String(m.matchId) === String(matchId));
     if (match) {
       match.status = newStatus;
-      // Sync back to savedLiveSessions if Type A
       const session = draftState.savedLiveSessions.find(s => String(s.matchId) === String(matchId));
       if (session) session.status = newStatus;
     }
     broadcastState();
   });
 
-  // ── Voting: Refresh match list ─────────────────────────────────────────────
+  // ── Referee: Refresh voting matches ───────────────────────────────────────
   socket.on('refRefreshVotingMatches', async () => {
     if (socket.id !== draftState.refereeId) return;
     await refreshVotingMatches();
   });
 
-  // ── Voting: Get Ballots (Ref only) ─────────────────────────────────────────
+  // ── Referee: Get ballots ───────────────────────────────────────────────────
   socket.on('refGetBallots', ({ matchId } = {}) => {
     if (socket.id !== draftState.refereeId) return;
     const ballots = votingState.ballots[matchId] || [];
     socket.emit('refBallotData', { matchId, ballots });
   });
 
-  // ── NEW Feature 2: Fan Submit Ballot with anti-double-vote ────────────────
-  socket.on('fanSubmitBallot', ({ txId, matchId, coachVote, scores } = {}) => {
-    // Gate 1: Master voting gate
+  // ── Fan: Submit ballot — 4-gate anti-cheat (Spec §6) ──────────────────────
+  // Type A: { txId, matchId, teamVote: 'team1'|'team2', matchType: 'A' }
+  // Type B: { txId, matchId, scores: { [name]: 0-10 }, matchType: 'B' }
+  socket.on('fanSubmitBallot', ({ txId, matchId, teamVote, coachVote, scores, matchType } = {}) => {
     if (!draftState.votingAllowed) {
       socket.emit('ballotResult', { success: false, error: 'VOTING_LOCKED' });
       return;
     }
-    // Gate 2: Match must exist and be OPEN
+    // Spec §6: fan must only see/access the mode opened by Ref
+    const mode = draftState.votingMode;
+    if (mode !== 'BOTH' && mode !== matchType) {
+      socket.emit('ballotResult', { success: false, error: 'MODE_NOT_OPEN' });
+      return;
+    }
     const match = votingState.votingMatches.find(m => String(m.matchId) === String(matchId));
     if (!match || match.status !== 'OPEN') {
       socket.emit('ballotResult', { success: false, error: 'MATCH_CLOSED' });
       return;
     }
-    // Gate 3: Verify ticket
     const voter = draftState.allViewers.find(v => v.txId === txId);
     if (!voter) {
       socket.emit('ballotResult', { success: false, error: 'NOT_VERIFIED' });
       return;
     }
-    // Gate 4: Anti-double vote
     if (!votingState.voteRegistry[matchId]) votingState.voteRegistry[matchId] = new Set();
     if (votingState.voteRegistry[matchId].has(txId)) {
       socket.emit('ballotResult', { success: false, error: 'ALREADY_VOTED' });
       return;
     }
-    // Record vote
     votingState.voteRegistry[matchId].add(txId);
     if (!votingState.ballots[matchId]) votingState.ballots[matchId] = [];
-    votingState.ballots[matchId].push({ txId, coachVote, scores, submittedAt: Date.now() });
+    votingState.ballots[matchId].push({
+      txId,
+      teamVote: teamVote || null,   // Type A
+      coachVote: coachVote || null, // legacy
+      scores: scores || {},         // Type B
+      matchType,
+      submittedAt: Date.now()
+    });
     socket.emit('ballotResult', { success: true });
     broadcastState();
   });
 
-  // ── Player: Pick card ──────────────────────────────────────────────────────
+  // ── Player: Pick card (Spec §1 — card immediately hidden from pool) ────────
   socket.on('playerPickCard', (cardId) => {
     const viewer = draftState.allViewers.find(v => v.id === socket.id);
     if (!viewer || !draftState.gameStarted || draftState.matchLocked) return;
     if (viewer.role !== draftState.currentTurn) return;
     const cardIdx = draftState.availableCards.findIndex(c => String(c.id || c.Id) === String(cardId));
     if (cardIdx === -1) return;
-    const [card] = draftState.availableCards.splice(cardIdx, 1);
+    const [card] = draftState.availableCards.splice(cardIdx, 1); // Removed from pool immediately
     if (draftState.currentTurn === 'team1') {
       draftState.team1Picks.push(card);
       draftState.currentTurn = 'team2';
@@ -488,26 +590,35 @@ io.on('connection', (socket) => {
     broadcastState();
   });
 
-  // ── Player: Set position ───────────────────────────────────────────────────
+  // ── Player: Set position (Spec §2 — single-slot enforcement) ──────────────
   socket.on('playerSetPosition', ({ cardId, slotIndex } = {}) => {
     const viewer = draftState.allViewers.find(v => v.id === socket.id);
-    if (!viewer) return;
-    const targetTactics = viewer.role === 'team1' ? draftState.team1Tactics : draftState.team2Tactics;
-    targetTactics[slotIndex] = draftState[viewer.role === 'team1' ? 'team1Picks' : 'team2Picks']
-      .find(c => String(c.id || c.Id) === String(cardId)) || null;
+    if (!viewer || draftState.matchReady) return;
+    const isTeam1 = viewer.role === 'team1';
+    const tactics = isTeam1 ? draftState.team1Tactics : draftState.team2Tactics;
+    const picks = isTeam1 ? draftState.team1Picks : draftState.team2Picks;
+    const card = picks.find(c => String(c.id || c.Id) === String(cardId));
+    if (!card) return;
+    // Remove card from any existing slot (single-slot enforcement)
+    for (const key of Object.keys(tactics)) {
+      if (tactics[key] && String(tactics[key].id || tactics[key].Id) === String(cardId)) {
+        delete tactics[key];
+      }
+    }
+    tactics[slotIndex] = card;
     broadcastState();
   });
 
   // ── Player: Set formation ──────────────────────────────────────────────────
   socket.on('playerSetFormation', ({ team, formation } = {}) => {
     const viewer = draftState.allViewers.find(v => v.id === socket.id);
-    if (!viewer) return;
+    if (!viewer || draftState.matchReady) return;
     if (viewer.role === 'team1' && team === 'team1') draftState.team1Formation = formation;
     if (viewer.role === 'team2' && team === 'team2') draftState.team2Formation = formation;
     broadcastState();
   });
 
-  // ── Clear Arena (ULTIMATE — full wipe) ────────────────────────────────────
+  // ── Clear Arena — ULTIMATE full wipe (Spec §0) ────────────────────────────
   socket.on('refClearArena', () => {
     if (socket.id !== draftState.refereeId) return;
     draftState = {
@@ -521,6 +632,7 @@ io.on('connection', (socket) => {
       currentTurn: 'team1',
       gameStarted: false,
       matchLocked: false,
+      matchReady: false,
       youtubeLink: 'https://www.youtube.com',
       arenaBanner: '',
       qrCodes: ['', '', '', '', '', ''],
@@ -531,24 +643,23 @@ io.on('connection', (socket) => {
       roomPhase: 'LOBBY',
       savedLiveSessions: [],
       votingAllowed: false,
+      votingMode: null,
     };
     votingState = { votingMatches: [], voteRegistry: {}, ballots: {} };
     io.emit('clearArenaForce');
     broadcastState();
   });
 
-  // ── Handle disconnect ──────────────────────────────────────────────────────
   socket.on('disconnect', () => {
     console.log(`[Socket] Disconnected: ${socket.id}`);
-    // Do NOT remove viewers on disconnect — they may refresh.
-    // Their socket ID will be updated on rejoin (Feature 6).
+    // Do NOT remove viewers — socket ID will be rebound on reconnect (Spec §7)
   });
 });
 
-// ── Initial data load & periodic refresh ──────────────────────────────────────
+// ── Boot ───────────────────────────────────────────────────────────────────────
 (async () => {
   await refreshVotingMatches();
-  setInterval(refreshVotingMatches, 5 * 60 * 1000); // Refresh every 5 minutes
+  setInterval(refreshVotingMatches, 5 * 60 * 1000);
 })();
 
 const PORT = process.env.PORT || 4000;
