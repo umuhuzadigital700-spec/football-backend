@@ -8,26 +8,51 @@ const path = require('path');
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
-
 app.use(cors());
 app.use(express.json());
 
-let liveMatchCounter = 0;
-function nextLiveMatchId() {
-  liveMatchCounter += 1;
-  const ts = new Date().toISOString().replace(/[-:T]/g, '').substring(0, 12);
-  return 'MATCH-LIVE-' + String(liveMatchCounter).padStart(3, '0') + '-' + ts;
+// ── Config ────────────────────────────────────────────────────────────────────
+const REF_TOKEN = process.env.REF_TOKEN || 'REFEREE_2025';
+const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || '';
+
+// ── Player cards ──────────────────────────────────────────────────────────────
+let masterCardPool = [];
+try {
+  masterCardPool = require('./cards.json');
+  console.log('[cards] Loaded', masterCardPool.length, 'cards from cards.json');
+} catch (e) {
+  const positions = ['GK','CB','CB','LB','RB','CM','CM','DM','LW','RW','ST'];
+  const firstNames = ['Jean','Pierre','David','Eric','Patrick','Kevin','James','Paul','Mark','Lucas','Omar','Sami','Ali','Yves','Frank','Ivan','Moses','Aaron','Isaac','Daniel','Michael','Robert','Chris','Tony','Steve'];
+  const lastNames = ['Mugabo','Nkurunziza','Habimana','Uwimana','Ndayishimiye','Bizimana','Hakizimana','Niyonzima','Tuyizere','Uwase','Kayitesi','Munyaneza','Nsengimana','Hategekimana','Kamanzi','Ndagijimana','Uwera','Gatera','Nzeyimana','Ishimwe'];
+  masterCardPool = Array.from({ length: 60 }, (_, i) => ({
+    id: 'P' + (i + 1),
+    name: firstNames[i % firstNames.length] + ' ' + lastNames[i % lastNames.length],
+    position: positions[i % positions.length],
+    rating: 65 + Math.floor((i * 7 + 13) % 30),
+    nationality: 'RW',
+  }));
+  console.log('[cards] Using 60 built-in dummy cards');
 }
 
-let savedLiveSessions = [];
+// ── Match ID ──────────────────────────────────────────────────────────────────
+let liveMatchCounter = 0;
+function nextMatchId() {
+  liveMatchCounter++;
+  const ts = new Date().toISOString().replace(/[-:T]/g,'').substring(0,12);
+  return 'MATCH-' + String(liveMatchCounter).padStart(3,'0') + '-' + ts;
+}
+
+// ── Persistent data (survives resets) ─────────────────────────────────────────
+let savedSessions = [];
 let votingMatches = [];
 let voteRegistry = {};
 let typeAStats = {};
 let typeBStats = {};
-let typeBBallots = {};
 let typeABallots = {};
+let typeBBallots = {};
 
-function freshGameState() {
+// ── Volatile state ────────────────────────────────────────────────────────────
+function freshState() {
   return {
     allViewers: [],
     gameStarted: false,
@@ -36,7 +61,8 @@ function freshGameState() {
     votingMode: 'BOTH',
     arenaBanner: null,
     youtubeLink: null,
-    qrCodes: ['', '', '', '', '', ''],
+    qrCodes: ['','','','','',''],
+    welcomeMessage: '',
     team1Player: null,
     team2Player: null,
     team1Picks: [],
@@ -51,334 +77,280 @@ function freshGameState() {
     matchReady: false,
   };
 }
+let S = freshState();
 
-let state = freshGameState();
+function pub() {
+  return { ...S, savedSessions, votingMatches, voteRegistry, typeAStats, typeBStats };
+}
+function broadcast() { io.emit('gameStateUpdate', pub()); }
+function bySocket(id) { return S.allViewers.find(v => v.id === id); }
+function byTxId(txId) { return S.allViewers.find(v => v.txId === txId); }
 
-function getPublicState() {
-  return { ...state, votingMatches, voteRegistry, typeAStats, typeBStats, savedLiveSessions };
+function recalcA(matchId) {
+  const b = typeABallots[matchId] || [];
+  let t1=0,t2=0;
+  b.forEach(x => { if(x.teamVote==='team1') t1++; else if(x.teamVote==='team2') t2++; });
+  typeAStats[matchId] = { team1Votes:t1, team2Votes:t2 };
+}
+function recalcB(matchId) {
+  const b = typeBBallots[matchId] || [];
+  if(!b.length){ typeBStats[matchId]={}; return; }
+  const tot={},cnt={};
+  b.forEach(x => Object.entries(x.scores||{}).forEach(([n,v])=>{ tot[n]=(tot[n]||0)+v; cnt[n]=(cnt[n]||0)+1; }));
+  typeBStats[matchId]={};
+  Object.keys(tot).forEach(n=>{ typeBStats[matchId][n]=(tot[n]/cnt[n]).toFixed(1); });
 }
 
-function broadcast() {
-  io.emit('gameStateUpdate', getPublicState());
-}
-
-function findViewerBySocket(socketId) { return state.allViewers.find(function(v) { return v.id === socketId; }); }
-function findViewerByTxId(txId) { return state.allViewers.find(function(v) { return v.txId === txId; }); }
-
-function recalcTypeBStats(matchId) {
-  const ballots = typeBBallots[matchId] || [];
-  if (ballots.length === 0) { typeBStats[matchId] = {}; return; }
-  const totals = {}, counts = {};
-  ballots.forEach(function(b) {
-    Object.entries(b.scores || {}).forEach(function(pair) {
-      totals[pair[0]] = (totals[pair[0]] || 0) + pair[1];
-      counts[pair[0]] = (counts[pair[0]] || 0) + 1;
-    });
-  });
-  typeBStats[matchId] = {};
-  Object.keys(totals).forEach(function(name) { typeBStats[matchId][name] = (totals[name] / counts[name]).toFixed(1); });
-}
-
-function recalcTypeAStats(matchId) {
-  const ballots = typeABallots[matchId] || [];
-  let t1 = 0, t2 = 0;
-  ballots.forEach(function(b) { if (b.teamVote === 'team1') t1++; else if (b.teamVote === 'team2') t2++; });
-  typeAStats[matchId] = { team1Votes: t1, team2Votes: t2 };
-}
-
-const REF_TOKEN = process.env.REF_TOKEN || 'REFEREE_2025';
-const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || '';
-
-let masterCardPool = [];
-try { masterCardPool = require('./cards.json'); }
-catch (e) {
-  masterCardPool = Array.from({ length: 50 }, function(_, i) {
-    return { id: 'P' + (i + 1), name: 'Player ' + (i + 1), position: ['GK','CB','LB','RB','CM','ST','LW','RW'][i % 8], rating: 70 + (i % 30) };
-  });
-}
-
-// ── Verify payment via Google Apps Script ─────────────────────────────────────
+// ── Payment verification ──────────────────────────────────────────────────────
 async function verifyPayment(txId, name) {
   if (!APPS_SCRIPT_URL) {
-    // No URL set: allow everyone (dev mode)
-    console.log('[verify] No APPS_SCRIPT_URL set — allowing all in dev mode');
+    console.log('[verify] No APPS_SCRIPT_URL — open access mode');
     return { success: true, isPremium: false };
   }
   try {
     const url = APPS_SCRIPT_URL + '?action=verify&txId=' + encodeURIComponent(txId) + '&name=' + encodeURIComponent(name);
-    const resp = await fetch(url);
-    const data = await resp.json();
-    return { success: !!data.success, isPremium: !!data.isPremium, error: data.error || 'Payment not found' };
-  } catch (err) {
-    console.error('[verify] Error:', err.message);
-    return { success: false, error: 'Verification service unavailable' };
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const d = await r.json();
+    return { success: !!d.success, isPremium: !!d.isPremium, error: d.error || 'Payment not found' };
+  } catch(e) {
+    console.error('[verify] Error:', e.message);
+    return { success: false, error: 'Verification unavailable. Try again.' };
   }
 }
 
-io.on('connection', function(socket) {
-  console.log('[connect] ' + socket.id);
-  socket.emit('gameStateUpdate', getPublicState());
+// ── Socket events ─────────────────────────────────────────────────────────────
+io.on('connection', socket => {
+  console.log('[+]', socket.id);
+  socket.emit('gameStateUpdate', pub());
 
-  // ── Join Waiting Room ───────────────────────────────────────────────────────
-  socket.on('joinWaitingRoom', async function(data) {
-    const name = data && data.name ? String(data.name).trim() : '';
-    const txId = data && data.ticketCode ? String(data.ticketCode).trim() : '';
+  // FAN JOIN
+  socket.on('joinWaitingRoom', async ({ name, ticketCode } = {}) => {
+    const n = String(name||'').trim();
+    const txId = String(ticketCode||'').trim();
+    if (!n || !txId) { socket.emit('joinResult', { success:false, error:'Name and Transaction ID are required.' }); return; }
 
-    if (!name || !txId) {
-      socket.emit('joinResult', { success: false, error: 'Name and transaction ID are required.' });
-      return;
-    }
-
-    // If already joined (reconnect)
-    const existing = findViewerByTxId(txId);
+    // Reconnect
+    const existing = byTxId(txId);
     if (existing) {
       existing.id = socket.id;
-      socket.emit('joinResult', { success: true, isPremium: existing.isPremium });
-      socket.emit('gameStateUpdate', getPublicState());
+      socket.emit('joinResult', { success:true, isPremium: existing.isPremium });
+      socket.emit('gameStateUpdate', pub());
       return;
     }
 
-    // Verify payment
-    const result = await verifyPayment(txId, name);
+    const result = await verifyPayment(txId, n);
     if (!result.success) {
-      socket.emit('joinResult', { success: false, error: result.error || 'Payment not found. Check your MoMo transaction ID.' });
+      socket.emit('joinResult', { success:false, error: result.error });
       return;
     }
 
-    const viewer = { id: socket.id, txId: txId, name: name, role: 'spectator', isPremium: !!result.isPremium, secureLink: null };
-    state.allViewers.push(viewer);
-    socket.emit('joinResult', { success: true, isPremium: viewer.isPremium });
+    const viewer = { id:socket.id, txId, name:n, role:'spectator', isPremium:!!result.isPremium };
+    S.allViewers.push(viewer);
+    socket.emit('joinResult', { success:true, isPremium: viewer.isPremium });
     broadcast();
   });
 
-  // ── Claim Referee ───────────────────────────────────────────────────────────
-  socket.on('claimReferee', function(token) {
+  // REFEREE
+  socket.on('claimReferee', token => {
     if (token !== REF_TOKEN) { socket.emit('refConfirm', false); return; }
     socket.emit('refConfirm', true);
-    socket.emit('gameStateUpdate', getPublicState());
-    console.log('[ref] Claimed by ' + socket.id);
+    socket.emit('gameStateUpdate', pub());
   });
 
-  // ── Referee: Assign Role ────────────────────────────────────────────────────
-  socket.on('refAssignRole', function(data) {
-    const viewer = state.allViewers.find(function(v) { return v.id === data.userId; });
-    if (!viewer) return;
-    viewer.role = data.role;
-    if (data.role === 'team1') state.team1Player = viewer;
-    else if (data.role === 'team2') state.team2Player = viewer;
+  socket.on('refSetBanner', url => { S.arenaBanner = url||null; broadcast(); });
+  socket.on('refSetYoutube', url => { S.youtubeLink = url||null; broadcast(); });
+  socket.on('refSetQRCodes', qrs => { if(Array.isArray(qrs)) S.qrCodes=qrs; broadcast(); });
+  socket.on('refSetWelcome', msg => { S.welcomeMessage = String(msg||''); broadcast(); });
+
+  socket.on('refAssignRole', ({ userId, role }) => {
+    const v = S.allViewers.find(x => x.id===userId);
+    if (!v) return;
+    v.role = role;
+    if (role==='team1') S.team1Player=v;
+    else if (role==='team2') S.team2Player=v;
     broadcast();
   });
 
-  socket.on('refStartDraft', function() {
-    state.gameStarted = true;
-    state.roomPhase = 'DRAFT';
-    state.matchLocked = false;
-    state.matchReady = false;
-    state.team1Picks = [];
-    state.team2Picks = [];
-    state.team1Tactics = {};
-    state.team2Tactics = {};
-    state.currentTurn = 'team1';
-    state.availableCards = [...masterCardPool].sort(function() { return Math.random() - 0.5; });
-    io.emit('gameSyncPhase', 'DRAFT');
+  socket.on('refRemoveViewer', ({ userId }) => {
+    S.allViewers = S.allViewers.filter(v => v.id !== userId);
+    if (S.team1Player && S.team1Player.id===userId) S.team1Player=null;
+    if (S.team2Player && S.team2Player.id===userId) S.team2Player=null;
     broadcast();
   });
 
-  socket.on('refLockMatch', function() { state.matchLocked = true; broadcast(); });
-
-  socket.on('refMatchReady', function() {
-    state.matchReady = true;
-    state.matchLocked = true;
-    socket.emit('refMatchReady_ack', { success: true });
+  socket.on('refStartDraft', () => {
+    S.gameStarted=true; S.roomPhase='DRAFT';
+    S.matchLocked=false; S.matchReady=false;
+    S.team1Picks=[]; S.team2Picks=[];
+    S.team1Tactics={}; S.team2Tactics={};
+    S.currentTurn='team1';
+    S.availableCards=[...masterCardPool].sort(()=>Math.random()-0.5);
+    io.emit('gameSyncPhase','DRAFT');
     broadcast();
   });
 
-  socket.on('refSaveLiveSession', function() {
-    if (!state.matchReady) { socket.emit('refSaveLiveSession_ack', { success: false, error: 'Match must be marked Ready first.' }); return; }
-    const coach1Name = state.team1Player ? state.team1Player.name : 'Team 1 Coach';
-    const coach2Name = state.team2Player ? state.team2Player.name : 'Team 2 Coach';
-    const matchId = nextLiveMatchId();
+  socket.on('refLockMatch', () => { S.matchLocked=true; broadcast(); });
+
+  socket.on('refMatchReady', () => {
+    S.matchReady=true; S.matchLocked=true;
+    socket.emit('refMatchReady_ack', { success:true });
+    broadcast();
+  });
+
+  socket.on('refSaveLiveSession', () => {
+    if (!S.matchReady) { socket.emit('refSaveLiveSession_ack',{success:false,error:'Mark match Ready first.'}); return; }
+    const c1 = S.team1Player?.name||'Team 1';
+    const c2 = S.team2Player?.name||'Team 2';
+    const matchId = nextMatchId();
     const entry = {
-      matchId: matchId, name: coach1Name + ' / Team 1 vs ' + coach2Name + ' / Team 2',
-      matchType: 'A', status: 'OPEN', coach1: coach1Name, coach2: coach2Name,
-      team1Picks: JSON.parse(JSON.stringify(state.team1Picks)),
-      team2Picks: JSON.parse(JSON.stringify(state.team2Picks)),
-      team1Formation: state.team1Formation, team2Formation: state.team2Formation,
-      t1Tactics: JSON.parse(JSON.stringify(state.team1Tactics)),
-      t2Tactics: JSON.parse(JSON.stringify(state.team2Tactics)),
+      matchId, matchType:'A', status:'OPEN',
+      name: c1+' vs '+c2,
+      coach1:c1, coach2:c2,
+      team1Picks: JSON.parse(JSON.stringify(S.team1Picks)),
+      team2Picks: JSON.parse(JSON.stringify(S.team2Picks)),
+      team1Formation: S.team1Formation, team2Formation: S.team2Formation,
+      t1Tactics: JSON.parse(JSON.stringify(S.team1Tactics)),
+      t2Tactics: JSON.parse(JSON.stringify(S.team2Tactics)),
       savedAt: new Date().toISOString(),
     };
-    savedLiveSessions.push(entry);
+    savedSessions.push(entry);
     votingMatches.push(entry);
-    typeABallots[matchId] = [];
-    typeAStats[matchId] = { team1Votes: 0, team2Votes: 0 };
-    voteRegistry[matchId] = [];
-    socket.emit('refSaveLiveSession_ack', { success: true, matchId: matchId });
+    typeABallots[matchId]=[]; typeAStats[matchId]={team1Votes:0,team2Votes:0};
+    voteRegistry[matchId]=[];
+    socket.emit('refSaveLiveSession_ack',{success:true,matchId});
     broadcast();
   });
 
-  socket.on('refToggleVotingStatus', function(data) {
-    const m = votingMatches.find(function(x) { return x.matchId === data.matchId; });
-    if (m) m.status = data.newStatus;
-    const s = savedLiveSessions.find(function(x) { return x.matchId === data.matchId; });
-    if (s) s.status = data.newStatus;
+  socket.on('refToggleVotingGate', ({ allowed, mode }) => {
+    S.votingAllowed=!!allowed; S.votingMode=mode||'BOTH';
+    if(allowed) io.emit('gameSyncPhase','VOTING');
     broadcast();
   });
 
-  socket.on('refToggleVotingGate', function(data) {
-    state.votingAllowed = !!data.allowed;
-    state.votingMode = data.mode || 'BOTH';
-    if (data.allowed) io.emit('gameSyncPhase', 'VOTING');
+  socket.on('refToggleVotingStatus', ({ matchId, newStatus }) => {
+    [votingMatches,savedSessions].forEach(arr=>{ const m=arr.find(x=>x.matchId===matchId); if(m) m.status=newStatus; });
     broadcast();
   });
 
-  socket.on('refRefreshVotingMatches', function() { socket.emit('gameStateUpdate', getPublicState()); });
-
-  socket.on('refGetBallots', function(data) {
-    const match = votingMatches.find(function(m) { return m.matchId === data.matchId; });
-    if (!match) { socket.emit('refBallotData', { matchId: data.matchId, ballots: [] }); return; }
-    if (match.matchType === 'A') {
-      socket.emit('refBallotData', { matchId: data.matchId, ballots: (typeABallots[data.matchId] || []).map(function(b) { return { txId: b.txId, teamVote: b.teamVote }; }) });
-    } else {
-      socket.emit('refBallotData', { matchId: data.matchId, ballots: (typeBBallots[data.matchId] || []).map(function(b) { return { txId: b.txId, scores: b.scores }; }) });
-    }
-  });
-
-  socket.on('refReset', function() {
-    state.team1Player = null; state.team2Player = null;
-    state.team1Picks = []; state.team2Picks = [];
-    state.team1Tactics = {}; state.team2Tactics = {};
-    state.team1Formation = '4-4-2'; state.team2Formation = '4-4-2';
-    state.currentTurn = 'team1'; state.gameStarted = false;
-    state.roomPhase = 'LOBBY'; state.matchLocked = false;
-    state.matchReady = false; state.availableCards = [];
-    state.allViewers.forEach(function(v) { v.role = 'spectator'; });
-    io.emit('gameSyncPhase', 'LOBBY');
-    broadcast();
-  });
-
-  socket.on('refRestart', function() {
-    state.team1Picks = []; state.team2Picks = [];
-    state.team1Tactics = {}; state.team2Tactics = {};
-    state.currentTurn = 'team1'; state.matchLocked = false; state.matchReady = false;
-    state.availableCards = [...masterCardPool].sort(function() { return Math.random() - 0.5; });
-    io.emit('gameSyncPhase', 'DRAFT');
-    broadcast();
-  });
-
-  socket.on('refClearArena', function() {
-    savedLiveSessions = []; votingMatches = []; voteRegistry = {};
-    typeAStats = {}; typeBStats = {}; typeBBallots = {}; typeABallots = {};
-    liveMatchCounter = 0; state = freshGameState();
-    io.emit('clearArenaForce');
-    broadcast();
-    console.log('[ref] Arena cleared.');
-  });
-
-  socket.on('refSetBanner', function(url) { state.arenaBanner = url; broadcast(); });
-  socket.on('refSetYoutube', function(url) { state.youtubeLink = url; broadcast(); });
-  socket.on('refSetQRCodes', function(qrs) { if (Array.isArray(qrs)) state.qrCodes = qrs; broadcast(); });
-
-  socket.on('refLoadTypeBMatches', function(matches) {
-    if (!Array.isArray(matches)) return;
-    matches.forEach(function(m) {
-      const matchId = m.matchId || m.tabName || m.name;
-      if (!matchId) return;
-      if (votingMatches.find(function(ex) { return ex.matchId === matchId; })) return;
-      const entry = Object.assign({}, m, { matchId: matchId, matchType: 'B', status: m.status || 'CLOSED' });
-      votingMatches.push(entry);
-      typeBBallots[matchId] = []; typeBStats[matchId] = {}; voteRegistry[matchId] = [];
+  socket.on('refLoadTypeBMatches', matches => {
+    if(!Array.isArray(matches)) return;
+    matches.forEach(m => {
+      const matchId = m.matchId||m.tabName||m.name;
+      if(!matchId||votingMatches.find(x=>x.matchId===matchId)) return;
+      votingMatches.push({...m,matchId,matchType:'B',status:m.status||'CLOSED'});
+      typeBBallots[matchId]=[]; typeBStats[matchId]={}; voteRegistry[matchId]=[];
     });
     broadcast();
   });
 
-  socket.on('playerPickCard', function(cardId) {
-    if (!state.gameStarted || state.matchReady) return;
-    const viewer = findViewerBySocket(socket.id);
-    if (!viewer) return;
-    const team = viewer.role;
-    if (team !== 'team1' && team !== 'team2') return;
-    if (state.currentTurn !== team) return;
-    const myPicks = team === 'team1' ? state.team1Picks : state.team2Picks;
-    if (myPicks.length >= 11) { socket.emit('error', 'Your roster is full (11/11).'); return; }
-    const strId = String(cardId);
-    const alreadyPicked = state.team1Picks.some(function(c) { return String(c.id) === strId; }) || state.team2Picks.some(function(c) { return String(c.id) === strId; });
-    if (alreadyPicked) { socket.emit('error', 'Card already picked.'); return; }
-    const cardIndex = state.availableCards.findIndex(function(c) { return String(c.id) === strId; });
-    if (cardIndex === -1) { socket.emit('error', 'Card not found in pool.'); return; }
-    const card = state.availableCards.splice(cardIndex, 1)[0];
-    myPicks.push(card);
-    state.currentTurn = team === 'team1' ? 'team2' : 'team1';
+  socket.on('refGetBallots', ({ matchId }) => {
+    const m = votingMatches.find(x=>x.matchId===matchId);
+    if(!m){ socket.emit('refBallotData',{matchId,ballots:[]}); return; }
+    if(m.matchType==='A') socket.emit('refBallotData',{matchId,ballots:(typeABallots[matchId]||[]).map(b=>({txId:b.txId,teamVote:b.teamVote}))});
+    else socket.emit('refBallotData',{matchId,ballots:(typeBBallots[matchId]||[]).map(b=>({txId:b.txId,scores:b.scores}))});
+  });
+
+  socket.on('refReset', () => {
+    S.team1Player=null; S.team2Player=null;
+    S.team1Picks=[]; S.team2Picks=[];
+    S.team1Tactics={}; S.team2Tactics={};
+    S.team1Formation='4-4-2'; S.team2Formation='4-4-2';
+    S.currentTurn='team1'; S.gameStarted=false; S.roomPhase='LOBBY';
+    S.matchLocked=false; S.matchReady=false; S.availableCards=[];
+    S.allViewers.forEach(v=>{ v.role='spectator'; });
+    io.emit('gameSyncPhase','LOBBY');
     broadcast();
   });
 
-  socket.on('playerSetFormation', function(data) {
-    if (state.matchReady) return;
-    const viewer = findViewerBySocket(socket.id);
-    if (!viewer || viewer.role !== data.team) return;
-    if (data.team === 'team1') state.team1Formation = data.formation;
-    else state.team2Formation = data.formation;
+  socket.on('refRestart', () => {
+    S.team1Picks=[]; S.team2Picks=[];
+    S.team1Tactics={}; S.team2Tactics={};
+    S.currentTurn='team1'; S.matchLocked=false; S.matchReady=false;
+    S.availableCards=[...masterCardPool].sort(()=>Math.random()-0.5);
+    io.emit('gameSyncPhase','DRAFT');
     broadcast();
   });
 
-  socket.on('playerSetPosition', function(data) {
-    if (state.matchReady) return;
-    const viewer = findViewerBySocket(socket.id);
-    if (!viewer) return;
-    const team = viewer.role;
-    if (team !== 'team1' && team !== 'team2') return;
-    const myPicks = team === 'team1' ? state.team1Picks : state.team2Picks;
-    const myTactics = team === 'team1' ? state.team1Tactics : state.team2Tactics;
-    const strId = String(data.cardId);
-    if (!myPicks.some(function(c) { return String(c.id) === strId; })) { socket.emit('error', 'Card not in your roster.'); return; }
-    Object.keys(myTactics).forEach(function(slot) { if (myTactics[slot] && String(myTactics[slot].id) === strId) delete myTactics[slot]; });
-    if (myTactics[data.slotIndex]) delete myTactics[data.slotIndex];
-    const card = myPicks.find(function(c) { return String(c.id) === strId; });
-    myTactics[data.slotIndex] = card;
-    if (team === 'team1') state.team1Tactics = myTactics; else state.team2Tactics = myTactics;
+  socket.on('refClearArena', () => {
+    savedSessions=[]; votingMatches=[]; voteRegistry={};
+    typeAStats={}; typeBStats={}; typeABallots={}; typeBBallots={};
+    liveMatchCounter=0; S=freshState();
+    io.emit('clearArenaForce');
     broadcast();
   });
 
-  socket.on('fanSubmitBallot', function(data) {
-    if (!state.votingAllowed) { socket.emit('ballotResult', { success: false, error: 'VOTING_LOCKED' }); return; }
-    const match = votingMatches.find(function(m) { return m.matchId === data.matchId; });
-    if (!match || match.status !== 'OPEN') { socket.emit('ballotResult', { success: false, error: 'MATCH_CLOSED' }); return; }
-    const mode = state.votingMode || 'BOTH';
-    if (mode !== 'BOTH' && match.matchType !== mode) { socket.emit('ballotResult', { success: false, error: 'MODE_NOT_OPEN' }); return; }
-    if (!voteRegistry[data.matchId]) voteRegistry[data.matchId] = [];
-    if (voteRegistry[data.matchId].includes(data.txId)) { socket.emit('ballotResult', { success: false, error: 'ALREADY_VOTED' }); return; }
-    const fan = findViewerByTxId(data.txId);
-    if (!fan) { socket.emit('ballotResult', { success: false, error: 'NOT_VERIFIED' }); return; }
-    voteRegistry[data.matchId].push(data.txId);
-    if (data.matchType === 'A' || match.matchType === 'A') {
-      if (!typeABallots[data.matchId]) typeABallots[data.matchId] = [];
-      typeABallots[data.matchId].push({ txId: data.txId, teamVote: data.teamVote, timestamp: Date.now() });
-      recalcTypeAStats(data.matchId);
+  // PLAYER ACTIONS
+  socket.on('playerPickCard', cardId => {
+    if(!S.gameStarted||S.matchReady) return;
+    const v=bySocket(socket.id);
+    if(!v||!['team1','team2'].includes(v.role)) return;
+    if(S.currentTurn!==v.role) { socket.emit('error','Not your turn.'); return; }
+    const picks = v.role==='team1'?S.team1Picks:S.team2Picks;
+    if(picks.length>=11) { socket.emit('error','Roster full.'); return; }
+    const strId=String(cardId);
+    if([...S.team1Picks,...S.team2Picks].some(c=>String(c.id)===strId)) { socket.emit('error','Already picked.'); return; }
+    const idx=S.availableCards.findIndex(c=>String(c.id)===strId);
+    if(idx===-1) { socket.emit('error','Card not available.'); return; }
+    const [card]=S.availableCards.splice(idx,1);
+    picks.push(card);
+    S.currentTurn=v.role==='team1'?'team2':'team1';
+    broadcast();
+  });
+
+  socket.on('playerSetFormation', ({ team, formation }) => {
+    if(S.matchReady) return;
+    const v=bySocket(socket.id);
+    if(!v||v.role!==team) return;
+    if(team==='team1') S.team1Formation=formation; else S.team2Formation=formation;
+    broadcast();
+  });
+
+  socket.on('playerSetPosition', ({ cardId, slotIndex }) => {
+    if(S.matchReady) return;
+    const v=bySocket(socket.id);
+    if(!v||!['team1','team2'].includes(v.role)) return;
+    const picks=v.role==='team1'?S.team1Picks:S.team2Picks;
+    const tactics=v.role==='team1'?S.team1Tactics:S.team2Tactics;
+    const strId=String(cardId);
+    if(!picks.some(c=>String(c.id)===strId)) { socket.emit('error','Not your card.'); return; }
+    Object.keys(tactics).forEach(s=>{ if(tactics[s]&&String(tactics[s].id)===strId) delete tactics[s]; });
+    if(tactics[slotIndex]) delete tactics[slotIndex];
+    tactics[slotIndex]=picks.find(c=>String(c.id)===strId);
+    broadcast();
+  });
+
+  // VOTING
+  socket.on('fanSubmitBallot', ({ txId, matchId, teamVote, scores, matchType }) => {
+    if(!S.votingAllowed) { socket.emit('ballotResult',{success:false,error:'Voting is closed.'}); return; }
+    const m=votingMatches.find(x=>x.matchId===matchId);
+    if(!m||m.status!=='OPEN') { socket.emit('ballotResult',{success:false,error:'This match is not open for voting.'}); return; }
+    if(!byTxId(txId)) { socket.emit('ballotResult',{success:false,error:'You must be verified to vote.'}); return; }
+    if(!voteRegistry[matchId]) voteRegistry[matchId]=[];
+    if(voteRegistry[matchId].includes(txId)) { socket.emit('ballotResult',{success:false,error:'You already voted on this match.'}); return; }
+    voteRegistry[matchId].push(txId);
+    if(m.matchType==='A') {
+      if(!typeABallots[matchId]) typeABallots[matchId]=[];
+      typeABallots[matchId].push({txId,teamVote,timestamp:Date.now()});
+      recalcA(matchId);
     } else {
-      if (!typeBBallots[data.matchId]) typeBBallots[data.matchId] = [];
-      typeBBallots[data.matchId].push({ txId: data.txId, scores: data.scores || {}, timestamp: Date.now() });
-      recalcTypeBStats(data.matchId);
+      if(!typeBBallots[matchId]) typeBBallots[matchId]=[];
+      typeBBallots[matchId].push({txId,scores:scores||{},timestamp:Date.now()});
+      recalcB(matchId);
     }
-    socket.emit('ballotResult', { success: true });
+    socket.emit('ballotResult',{success:true});
     broadcast();
   });
-
-  socket.on('disconnect', function() { console.log('[disconnect] ' + socket.id); });
 });
 
-app.get('/api/state', function(req, res) { res.json(getPublicState()); });
-app.get('/api/matches', function(req, res) { res.json(votingMatches); });
-app.get('/api/ballots/:matchId', function(req, res) {
-  const match = votingMatches.find(function(m) { return m.matchId === req.params.matchId; });
-  if (!match) return res.status(404).json({ error: 'Match not found' });
-  if (match.matchType === 'A') res.json({ ballots: typeABallots[req.params.matchId] || [], stats: typeAStats[req.params.matchId] || {} });
-  else res.json({ ballots: typeBBallots[req.params.matchId] || [], stats: typeBStats[req.params.matchId] || {} });
+app.get('/api/state', (_,res) => res.json(pub()));
+app.get('/api/matches', (_,res) => res.json(votingMatches));
+app.get('/api/ballots/:matchId', (req,res) => {
+  const m=votingMatches.find(x=>x.matchId===req.params.matchId);
+  if(!m) return res.status(404).json({error:'Not found'});
+  res.json(m.matchType==='A'
+    ? {ballots:typeABallots[req.params.matchId]||[],stats:typeAStats[req.params.matchId]||{}}
+    : {ballots:typeBBallots[req.params.matchId]||[],stats:typeBStats[req.params.matchId]||{}});
 });
 
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, 'build')));
-  app.get('*', function(req, res) { res.sendFile(path.join(__dirname, 'build', 'index.html')); });
-}
-
-const PORT = process.env.PORT || 4000;
-server.listen(PORT, function() { console.log('Arena server running on port ' + PORT); });
+const PORT=process.env.PORT||4000;
+server.listen(PORT,()=>console.log('Arena server on port',PORT));
